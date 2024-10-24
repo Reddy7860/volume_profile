@@ -1,4 +1,4 @@
-title: Volume Profile
+title: Volume_Profile
 emoji: 🏃
 colorFrom: purple
 colorTo: blue
