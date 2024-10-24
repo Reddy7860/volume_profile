@@ -60,7 +60,10 @@ def calculate_volume_profile(data, row_layout):
         bin_indices = np.digitize(low_high, bin_edges) - 1
         bin_indices = [max(0, min(bins - 2, b)) for b in bin_indices]
 
-        volume_profile.iloc[bin_indices[0]:bin_indices[1] + 1, volume_profile.columns.get_loc('Total Volume')] += row['Volume']
+        # Check that bin_indices[0] <= bin_indices[1] to avoid invalid slices
+        if bin_indices[0] <= bin_indices[1]:
+            # Ensure the slice is within bounds
+            volume_profile.iloc[bin_indices[0]:bin_indices[1] + 1, volume_profile.columns.get_loc('Total Volume')] += row['Volume']
 
     return volume_profile
 
