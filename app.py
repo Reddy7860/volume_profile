@@ -25,6 +25,24 @@ def fetch_stock_data(ticker, start, interval='1m'):
 data = fetch_stock_data(ticker, start_date)
 
 # Calculate the volume profile with buy and sell volumes
+# def calculate_volume_profile(data, row_layout):
+#     price_min = data['Low'].min()
+#     price_max = data['High'].max()
+
+#     bins = row_layout
+#     bin_edges = np.linspace(price_min, price_max, bins)
+
+#     volume_profile = pd.DataFrame(index=bin_edges[:-1], columns=['Total Volume'])
+#     volume_profile['Total Volume'] = 0
+
+#     for index, row in data.iterrows():
+#         bin_indices = np.digitize([row['Low'], row['High']], bin_edges) - 1
+#         bin_indices = [max(0, min(bins-2, b)) for b in bin_indices]
+
+#         volume_profile.iloc[bin_indices[0]:bin_indices[1] + 1, volume_profile.columns.get_loc('Total Volume')] += row['Volume']
+
+#     return volume_profile
+
 def calculate_volume_profile(data, row_layout):
     price_min = data['Low'].min()
     price_max = data['High'].max()
@@ -32,7 +50,8 @@ def calculate_volume_profile(data, row_layout):
     bins = row_layout
     bin_edges = np.linspace(price_min, price_max, bins)
 
-    volume_profile = pd.DataFrame(index=bin_edges[:-1], columns=['Total Volume'])
+    # Ensure the index is 1D by flattening the bin_edges
+    volume_profile = pd.DataFrame(index=bin_edges[:-1].flatten(), columns=['Total Volume'])
     volume_profile['Total Volume'] = 0
 
     for index, row in data.iterrows():
