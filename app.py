@@ -24,7 +24,7 @@ def fetch_stock_data(ticker, start, interval='1m'):
 
 data = fetch_stock_data(ticker, start_date)
 
-Calculate the volume profile with buy and sell volumes
+# Calculate the volume profile with buy and sell volumes
 def calculate_volume_profile(data, row_layout):
     price_min = data['Low'].min()
     price_max = data['High'].max()
