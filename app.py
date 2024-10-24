@@ -48,15 +48,17 @@ def calculate_volume_profile(data, row_layout):
     price_max = data['High'].max()
 
     bins = row_layout
-    bin_edges = np.linspace(price_min, price_max, bins)
+    bin_edges = np.linspace(price_min, price_max, bins).flatten()  # Ensure it's a 1D array
 
-    # Ensure the index is 1D by flattening the bin_edges
-    volume_profile = pd.DataFrame(index=bin_edges[:-1].flatten(), columns=['Total Volume'])
+    volume_profile = pd.DataFrame(index=bin_edges[:-1], columns=['Total Volume'])
     volume_profile['Total Volume'] = 0
 
     for index, row in data.iterrows():
-        bin_indices = np.digitize([row['Low'], row['High']], bin_edges) - 1
-        bin_indices = [max(0, min(bins-2, b)) for b in bin_indices]
+        low_high = [row['Low'], row['High']]
+
+        # Ensure low_high is 1D and valid for digitize
+        bin_indices = np.digitize(low_high, bin_edges) - 1
+        bin_indices = [max(0, min(bins - 2, b)) for b in bin_indices]
 
         volume_profile.iloc[bin_indices[0]:bin_indices[1] + 1, volume_profile.columns.get_loc('Total Volume')] += row['Volume']
 
