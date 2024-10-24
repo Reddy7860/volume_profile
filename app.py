@@ -24,48 +24,25 @@ def fetch_stock_data(ticker, start, interval='1m'):
 
 data = fetch_stock_data(ticker, start_date)
 
-# Calculate the volume profile with buy and sell volumes
-# def calculate_volume_profile(data, row_layout):
-#     price_min = data['Low'].min()
-#     price_max = data['High'].max()
-
-#     bins = row_layout
-#     bin_edges = np.linspace(price_min, price_max, bins)
-
-#     volume_profile = pd.DataFrame(index=bin_edges[:-1], columns=['Total Volume'])
-#     volume_profile['Total Volume'] = 0
-
-#     for index, row in data.iterrows():
-#         bin_indices = np.digitize([row['Low'], row['High']], bin_edges) - 1
-#         bin_indices = [max(0, min(bins-2, b)) for b in bin_indices]
-
-#         volume_profile.iloc[bin_indices[0]:bin_indices[1] + 1, volume_profile.columns.get_loc('Total Volume')] += row['Volume']
-
-#     return volume_profile
-
+Calculate the volume profile with buy and sell volumes
 def calculate_volume_profile(data, row_layout):
     price_min = data['Low'].min()
     price_max = data['High'].max()
 
     bins = row_layout
-    bin_edges = np.linspace(price_min, price_max, bins).flatten()  # Ensure it's a 1D array
+    bin_edges = np.linspace(price_min, price_max, bins)
 
     volume_profile = pd.DataFrame(index=bin_edges[:-1], columns=['Total Volume'])
     volume_profile['Total Volume'] = 0
 
     for index, row in data.iterrows():
-        low_high = [row['Low'], row['High']]
+        bin_indices = np.digitize([row['Low'], row['High']], bin_edges) - 1
+        bin_indices = [max(0, min(bins-2, b)) for b in bin_indices]
 
-        # Ensure low_high is 1D and valid for digitize
-        bin_indices = np.digitize(low_high, bin_edges) - 1
-        bin_indices = [max(0, min(bins - 2, b)) for b in bin_indices]
-
-        # Check that bin_indices[0] <= bin_indices[1] to avoid invalid slices
-        if bin_indices[0] <= bin_indices[1]:
-            # Ensure the slice is within bounds
-            volume_profile.iloc[bin_indices[0]:bin_indices[1] + 1, volume_profile.columns.get_loc('Total Volume')] += row['Volume']
+        volume_profile.iloc[bin_indices[0]:bin_indices[1] + 1, volume_profile.columns.get_loc('Total Volume')] += row['Volume']
 
     return volume_profile
+
 
 # Function to calculate VAH, VAL, POC
 def calculate_vah_val_poc(volume_profile):
