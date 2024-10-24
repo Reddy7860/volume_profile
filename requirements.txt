@@ -1,0 +1,8 @@
+
+Copy code
+streamlit
+yfinance
+numpy
+pandas
+plotly
+scipy
