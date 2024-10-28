@@ -15,7 +15,7 @@ selected_strategy = st.sidebar.selectbox("Select Strategy", ['Momentum', 'Revers
 st.title("Real-time Volume Profile with Market Shape Detection")
 
 ticker = st.text_input("Enter Stock Ticker", value="AAPL")
-start_date = st.date_input("Start Date", value=pd.to_datetime("2024-10-17"))
+start_date = st.date_input("Start Date", value=pd.to_datetime("2024-10-25"))
 
 # Fetch stock data in real-time
 def fetch_stock_data(ticker, start, interval='1m'):
@@ -209,6 +209,52 @@ daily_data['Date'] = pd.to_datetime(daily_data['Date']).dt.date
 # Merge ATR into 30-minute data
 data['Date'] = pd.to_datetime(data['Datetime']).dt.date
 final_data = pd.merge(data, daily_data[['Date', 'ATR_14_1_day', 'Prev_Day_ATR_14_1_Day']], on='Date', how='left')
+
+# Calculate Moving Average (MA)
+final_data['MA_20'] = final_data['Close'].rolling(window=20).mean()
+
+# Calculate Relative Strength Index (RSI)
+delta = final_data['Close'].diff()
+gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+final_data['RSI'] = 100 - (100 / (1 + gain / loss))
+
+# Calculate Moving Average Convergence Divergence (MACD)
+short_ema = final_data['Close'].ewm(span=12, adjust=False).mean()
+long_ema = final_data['Close'].ewm(span=26, adjust=False).mean()
+final_data['MACD'] = short_ema - long_ema
+final_data['Signal Line'] = final_data['MACD'].ewm(span=9, adjust=False).mean()
+
+# Calculate Bollinger Bands
+final_data['MA_20'] = final_data['Close'].rolling(window=20).mean()
+final_data['Bollinger_Upper'] = final_data['MA_20'] + (final_data['Close'].rolling(window=20).std() * 2)
+final_data['Bollinger_Lower'] = final_data['MA_20'] - (final_data['Close'].rolling(window=20).std() * 2)
+
+# Calculate Volume Weighted Average Price (VWAP)
+final_data['VWAP'] = (final_data['Volume'] * (final_data['High'] + final_data['Low'] + final_data['Close']) / 3).cumsum() / final_data['Volume'].cumsum()
+
+# Calculate Fibonacci Retracement Levels (use high and low from a specific range if applicable)
+highest = final_data['High'].max()
+lowest = final_data['Low'].min()
+final_data['Fib_38.2'] = highest - (highest - lowest) * 0.382
+final_data['Fib_50'] = (highest + lowest) / 2
+final_data['Fib_61.8'] = highest - (highest - lowest) * 0.618
+
+# Calculate Average True Range (ATR)
+high_low = final_data['High'] - final_data['Low']
+high_close = np.abs(final_data['High'] - final_data['Close'].shift())
+low_close = np.abs(final_data['Low'] - final_data['Close'].shift())
+true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+final_data['ATR'] = true_range.rolling(window=14).mean()
+
+# Calculate Stochastic Oscillator
+final_data['14-high'] = final_data['High'].rolling(window=14).max()
+final_data['14-low'] = final_data['Low'].rolling(window=14).min()
+final_data['%K'] = (final_data['Close'] - final_data['14-low']) * 100 / (final_data['14-high'] - final_data['14-low'])
+final_data['%D'] = final_data['%K'].rolling(window=3).mean()
+
+# Calculate Parabolic SAR (for simplicity, this example uses a fixed acceleration factor)
+final_data['PSAR'] = final_data['Close'].shift() + (0.02 * (final_data['High'] - final_data['Low']))
 
 # st.write(final_data)
 
@@ -444,7 +490,7 @@ for i in range(2, len(sorted_dates)):
 final_data['casted_date'] = final_data['Date']
 
 # Sort by casted_date to ensure correct order
-final_data = final_data.sort_values(by='casted_date')
+final_data = final_data.sort_values(by='Datetime')
 
 # Create a 'casted_date' column to only capture the date part of the Datetime
 final_data['casted_date'] = final_data['Date']
@@ -478,6 +524,46 @@ if not filtered_data.empty:
     st.write(f"2 Day VAH and VAL: VAH - {filtered_data['VAH'].values[0]}, VAL - {signals_df['Previous Day VAL'].values[-1]}")
 
     st.write(filtered_data)
+#     st.write(filtered_data.columns)
+    
+    # Calculate the opening price and difference from the previous close
+    opening_price = filtered_data.iloc[0]['Open']
+    previous_close = previous_filtered_data.iloc[-1]['Close']
+    open_point_diff = round(opening_price - previous_close, 2) if previous_close else None
+    open_percent_diff = round((open_point_diff / previous_close) * 100, 2) if previous_close else None
+    open_above_below = "above" if open_point_diff > 0 else "below" if open_point_diff < 0 else "no change"
+    
+    current_row = filtered_data.iloc[0]
+    last_row = previous_filtered_data.iloc[-1]
+    
+    # Generate the LLM input text with added indicators
+    input_text = (
+        f"Today’s profile on {start_date} for {ticker} indicates an {current_row['IB Range']} Range. The market opened at {opening_price}, "
+        f"which is {open_percent_diff}% ({abs(open_point_diff)} points) {open_above_below} the previous day's close. "
+        f"The Initial Balance High is {current_row['Initial Balance High']} and Low is {current_row['Initial Balance Low']}, "
+        f"giving an Initial Balance Range of {current_row['Initial Balance Range']}. "
+        f"Yesterday's VAH was {last_row['VAH']} and VAL was {last_row['VAL']}. "
+        f"Day before yesterday's VAH was {last_row['Previous Day VAH']} and VAL was {last_row['Previous Day VAL']}. "
+        f"Previous day Type: {last_row['Day Type']}.\n"
+        f"Previous Adjusted Day Type: {final_day_type}.\n"
+        f"Previous Close Type: {last_row['Close Type']}.\n"
+        f"Previous 2 Day VAH and VAL: {current_row['2 Day VAH and VAL']}.\n"
+
+        # Adding indicators
+        f"Moving Average (20-day) is {last_row['MA_20']}. "
+        f"Relative Strength Index (RSI) is {last_row['RSI']}. "
+        f"MACD is {last_row['MACD']} with Signal Line at {last_row['Signal Line']}. "
+        f"Bollinger Bands Upper at {last_row['Bollinger_Upper']} and Lower at {last_row['Bollinger_Lower']}. "
+        f"Volume Weighted Average Price (VWAP) is {last_row['VWAP']}. "
+        f"Fibonacci Levels: 38.2% at {last_row['Fib_38.2']}, 50% at {last_row['Fib_50']}, 61.8% at {last_row['Fib_61.8']}. "
+        f"Average True Range (ATR) is {last_row['ATR']}. "
+        f"Stochastic Oscillator %K is {last_row['%K']} and %D is {last_row['%D']}. "
+        f"Parabolic SAR is at {last_row['PSAR']}. "
+
+        f"Given these indicators, what is the expected market direction for today?"
+    )
+
+    st.write(input_text)
     
     # Probability of repeatability based on the types of days
     day_type_summary = final_data['Day Type'].value_counts().reset_index()
