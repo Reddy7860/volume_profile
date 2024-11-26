@@ -4,4 +4,4 @@ numpy
 pandas
 plotly
 scipy
-ta-lib-bin
+ta-lib-bin==0.4.26
