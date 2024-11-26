@@ -4,4 +4,4 @@ numpy
 pandas
 plotly
 scipy
-talib
+ta-lib
