@@ -3,7 +3,9 @@ import yfinance as yf
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 from scipy.stats import skew, kurtosis
+from scipy.stats import linregress
 from collections import defaultdict
 import requests
 from io import StringIO
@@ -11,6 +13,9 @@ from datetime import datetime
 import re
 from sentence_transformers import SentenceTransformer, util
 import openai
+import talib
+import math
+
 
 # Sidebar for inputs
 st.sidebar.title("Trading Dashboard")
@@ -66,6 +71,253 @@ elif tab == "Chat Interface":
         return stock_data
 
     data = fetch_stock_data(ticker, input_date)
+
+    temp_data = data.copy()
+
+    # Ensure the DataFrame index is a DatetimeIndex for VWAP calculations
+    temp_data.reset_index(inplace=True)  # Reset index for column access
+    temp_data.set_index(pd.DatetimeIndex(temp_data["Datetime"]), inplace=True)  # Use 'Datetime' as the index
+
+    # Function to calculate Cumulative Volume Delta (CVD)
+    def calculate_cvd(data):
+        """
+        Calculate the Cumulative Volume Delta (CVD) and additional metrics.
+        """
+        data['delta'] = data['Close'] - data['Open']  # Price delta
+        data['buy_volume'] = data['Volume'] * (data['delta'] > 0).astype(int)
+        data['sell_volume'] = data['Volume'] * (data['delta'] < 0).astype(int)
+        data['cvd'] = (data['buy_volume'] - data['sell_volume']).cumsum()
+        return data
+
+    # Function to identify support and resistance levels
+    def identify_support_resistance(data, start_time, end_time):
+        """
+        Identify support (most selling) and resistance (most buying) levels for a given time range.
+        """
+        time_frame = data.between_time(start_time, end_time).copy()
+        time_frame = calculate_cvd(time_frame)
+        
+        if time_frame.empty:
+            return {}
+
+        # Support: Price level with most selling (most negative CVD)
+        support_idx = time_frame['cvd'].idxmin()
+        support_level = time_frame.loc[support_idx, 'Close']
+        support_time = support_idx
+
+        # Resistance: Price level with most buying (most positive CVD)
+        resistance_idx = time_frame['cvd'].idxmax()
+        resistance_level = time_frame.loc[resistance_idx, 'Close']
+        resistance_time = resistance_idx
+
+        return {
+            "support_level": round(support_level, 2),
+            "support_time": support_time.tz_localize(None).strftime('%Y-%m-%d %H:%M:%S'),
+            "resistance_level": round(resistance_level, 2),
+            "resistance_time": resistance_time.tz_localize(None).strftime('%Y-%m-%d %H:%M:%S'),
+        }
+
+    # Calculate CVD for the 09:30-16:00 timeframe
+    cvd_data = temp_data.between_time("09:30", "16:00").copy()
+    cvd_data = calculate_cvd(cvd_data)
+
+    # Identify support and resistance for the 09:30-10:30 timeframe
+    support_resistance_stats = identify_support_resistance(temp_data, "09:30", "10:30")
+    support_level = support_resistance_stats["support_level"]
+    support_time = support_resistance_stats["support_time"]
+    resistance_level = support_resistance_stats["resistance_level"]
+    resistance_time = support_resistance_stats["resistance_time"]
+
+    # # Adding Buy/Sell signals to the data
+    # cvd_data['signal'] = None
+    # cvd_data['signal_type'] = None
+
+    # # Logic for Buy/Sell signals
+    # cvd_data['signal'] = cvd_data.apply(
+    #     lambda row: row['Close'] if (row['Close'] > resistance_level and row['cvd'] > cvd_data.loc[resistance_time, 'cvd']) else (
+    #         row['Close'] if (row['Close'] < support_level and row['cvd'] < cvd_data.loc[support_time, 'cvd']) else None),
+    #     axis=1
+    # )
+
+    # cvd_data['signal_type'] = cvd_data.apply(
+    #     lambda row: 'Buy' if (row['Close'] > resistance_level and row['cvd'] > cvd_data.loc[resistance_time, 'cvd']) else (
+    #         'Sell' if (row['Close'] < support_level and row['cvd'] < cvd_data.loc[support_time, 'cvd']) else None),
+    #     axis=1
+    # )
+
+    # Identify the first Buy signal
+    first_buy_signal = cvd_data[(cvd_data['Close'] > resistance_level) & 
+                                (cvd_data['cvd'] > cvd_data.loc[resistance_time, 'cvd'])].iloc[:1]
+
+    # Identify the first Sell signal
+    first_sell_signal = cvd_data[(cvd_data['Close'] < support_level) & 
+                                (cvd_data['cvd'] < cvd_data.loc[support_time, 'cvd'])].iloc[:1]
+
+    # Add first Buy and Sell timestamps if available
+    first_buy_time = first_buy_signal.index[0].strftime('%Y-%m-%d %H:%M:%S') if not first_buy_signal.empty else "N/A"
+    first_sell_time = first_sell_signal.index[0].strftime('%Y-%m-%d %H:%M:%S') if not first_sell_signal.empty else "N/A"
+
+    st.write("Buy Time: ", first_buy_time)
+    st.write("Sell Time: ", first_sell_time)
+
+    # Update hovertext to include first Buy/Sell timestamps
+    cvd_data['hovertext'] = (
+        "Time: " + cvd_data.index.strftime('%Y-%m-%d %H:%M:%S') +
+        "<br>Open: " + round(cvd_data['Open'], 2).astype(str) +
+        "<br>High: " + round(cvd_data['High'], 2).astype(str) +
+        "<br>Low: " + round(cvd_data['Low'], 2).astype(str) +
+        "<br>Close: " + round(cvd_data['Close'], 2).astype(str) +
+        "<br>CVD: " + round(cvd_data['cvd'], 2).astype(str) +
+        f"<br>Support Level: {support_level}" +
+        f"<br>Support Time: {support_time}" +
+        f"<br>Resistance Level: {resistance_level}" +
+        f"<br>Resistance Time: {resistance_time}" +
+        f"<br>First Buy Time: {first_buy_time}" +
+        f"<br>First Sell Time: {first_sell_time}"
+    )
+
+    # Create the candlestick chart with CVD
+    fig = go.Figure()
+
+    # Add candlestick trace
+    fig.add_trace(go.Candlestick(
+        x=cvd_data.index,
+        open=cvd_data['Open'],
+        high=cvd_data['High'],
+        low=cvd_data['Low'],
+        close=cvd_data['Close'],
+        name='Candlestick',
+        hovertext=cvd_data['hovertext'],
+        hoverinfo='text'
+    ))
+
+    # Add CVD as a line trace on a secondary y-axis
+    fig.add_trace(go.Scatter(
+        x=cvd_data.index,
+        y=cvd_data['cvd'],
+        mode='lines',
+        name='Cumulative Volume Delta (CVD)',
+        line=dict(color='orange'),
+        yaxis='y2',  # Use secondary y-axis
+    ))
+
+    # Add support line
+    fig.add_shape(
+        type="line",
+        x0=cvd_data.index.min(),
+        x1=cvd_data.index.max(),
+        y0=support_level,
+        y1=support_level,
+        line=dict(color="blue", dash="dot"),
+        name="Support Level",
+    )
+
+    # Add resistance line
+    fig.add_shape(
+        type="line",
+        x0=cvd_data.index.min(),
+        x1=cvd_data.index.max(),
+        y0=resistance_level,
+        y1=resistance_level,
+        line=dict(color="red", dash="dot"),
+        name="Resistance Level",
+    )
+
+    # # # Update layout to include a secondary y-axis for CVD
+    # # fig.update_layout(
+    # #     title="Candlestick Chart with CVD (09:30-16:00) and Support/Resistance (09:30-10:30)",
+    # #     xaxis_title="Time",
+    # #     yaxis_title="Price",
+    # #     yaxis2=dict(
+    # #         title="CVD",
+    # #         overlaying='y',
+    # #         side='right'
+    # #     ),
+    # #     template="plotly_dark",
+    # #     hovermode="x unified"
+    # # )
+
+    # # Adding Buy signals (triangle-up)
+    # fig.add_trace(go.Scatter(
+    #     x=cvd_data[cvd_data['signal_type'] == 'Buy'].index,
+    #     y=cvd_data[cvd_data['signal_type'] == 'Buy']['signal'],
+    #     mode='markers',
+    #     name='Buy Signal',
+    #     marker=dict(symbol='triangle-up', color='green', size=10),
+    #     hoverinfo='text',
+    #     hovertext="Buy Signal"
+    # ))
+
+    # # Adding Sell signals (triangle-down)
+    # fig.add_trace(go.Scatter(
+    #     x=cvd_data[cvd_data['signal_type'] == 'Sell'].index,
+    #     y=cvd_data[cvd_data['signal_type'] == 'Sell']['signal'],
+    #     mode='markers',
+    #     name='Sell Signal',
+    #     marker=dict(symbol='triangle-down', color='red', size=10),
+    #     hoverinfo='text',
+    #     hovertext="Sell Signal"
+    # ))
+
+    # # Update layout to include the signals
+    # fig.update_layout(
+    #     title="Candlestick Chart with CVD and Buy/Sell Signals",
+    #     xaxis_title="Time",
+    #     yaxis_title="Price",
+    #     yaxis2=dict(
+    #         title="CVD",
+    #         overlaying='y',
+    #         side='right'
+    #     ),
+    #     template="plotly_dark",
+    #     hovermode="x unified"
+    # )
+
+    # Add Buy signal (triangle-up) to the chart
+    if not first_buy_signal.empty:
+        fig.add_trace(go.Scatter(
+            x=first_buy_signal.index,
+            y=first_buy_signal['Close'],
+            mode='markers',
+            name='First Buy Signal',
+            marker=dict(symbol='triangle-up', color='green', size=10),
+            hoverinfo='text',
+            hovertext="First Buy Signal"
+        ))
+
+    # Add Sell signal (triangle-down) to the chart
+    if not first_sell_signal.empty:
+        fig.add_trace(go.Scatter(
+            x=first_sell_signal.index,
+            y=first_sell_signal['Close'],
+            mode='markers',
+            name='First Sell Signal',
+            marker=dict(symbol='triangle-down', color='red', size=10),
+            hoverinfo='text',
+            hovertext="First Sell Signal"
+        ))
+
+    
+    # Update layout to include the filtered signals
+    fig.update_layout(
+        title="Candlestick Chart with CVD and First Buy/Sell Signals",
+        xaxis_title="Time",
+        yaxis_title="Price",
+        yaxis2=dict(
+            title="CVD",
+            overlaying='y',
+            side='right'
+        ),
+        template="plotly_dark",
+        hovermode="x unified"
+    )
+
+
+    # Display the chart in Streamlit
+    st.plotly_chart(fig)
+
+    
+    
 
     # Calculate the volume profile with buy and sell volumes
     def calculate_volume_profile(data, row_layout):
@@ -226,62 +478,586 @@ elif tab == "Chat Interface":
 
     data = fetch_stock_data(ticker)
 
+    dji_data = fetch_stock_data('^DJI')
+    nasdaq_data = fetch_stock_data('^IXIC')
+    s_and_p_500_data = fetch_stock_data('^GSPC')
+
+    # Calculate percentage changes in 'Close' prices
+    data['pct_change'] = data['Close'].pct_change()
+    dji_data['DJI_pct_change'] = dji_data['Close'].pct_change()
+    nasdaq_data['NASDAQ_pct_change'] = nasdaq_data['Close'].pct_change()
+    s_and_p_500_data['S_AND_P_500_pct_change'] = s_and_p_500_data['Close'].pct_change()
+
+    # Align all dataframes to match by timestamp
+    merged_data = pd.merge(data[['Datetime', 'pct_change']],
+                        dji_data[['Datetime', 'DJI_pct_change']],
+                        on='Datetime', how='inner')
+
+    merged_data = pd.merge(merged_data,
+                        nasdaq_data[['Datetime', 'NASDAQ_pct_change']],
+                        on='Datetime', how='inner')
+
+    merged_data = pd.merge(merged_data,
+                        s_and_p_500_data[['Datetime', 'S_AND_P_500_pct_change']],
+                        on='Datetime', how='inner')
+
+    # Drop NaN values resulting from the percentage change calculation
+    merged_data.dropna(inplace=True)
+
+    # Calculate correlations
+    correlation_dji = merged_data['pct_change'].corr(merged_data['DJI_pct_change'])
+    correlation_nasdaq = merged_data['pct_change'].corr(merged_data['NASDAQ_pct_change'])
+    correlation_s_and_p_500 = merged_data['pct_change'].corr(merged_data['S_AND_P_500_pct_change'])
+
+    # Display correlations using Streamlit
+    st.write(f"Correlation between {ticker} and DJI movements: {correlation_dji:.2f}")
+    st.write(f"Correlation between {ticker} and NASDAQ movements: {correlation_nasdaq:.2f}")
+    st.write(f"Correlation between {ticker} and S&P 500 movements: {correlation_s_and_p_500:.2f}")
+
+    temp_data = data.copy()
+
+
+    # Define the main function
+    def calculate_indicators_and_scores(temp_data):
+        # Helper Functions
+        def interpolate(value, value_high, value_low, range_high, range_low):
+            """Interpolate a value to a new range."""
+            return range_low + (value - value_low) * (range_high - range_low) / (value_high - value_low)
+
+        def calculate_bbp_score(bbp, upper, lower):
+            if bbp > upper:
+                if bbp > 1.5 * upper:
+                    return 100
+                return interpolate(bbp, 1.5 * upper, upper, 100, 75)
+            elif bbp > 0:
+                return interpolate(bbp, upper, 0, 75, 50)
+            elif bbp < lower:
+                if bbp < 1.5 * lower:
+                    return 0
+                return interpolate(bbp, lower, 1.5 * lower, 25, 0)
+            elif bbp < 0:
+                return interpolate(bbp, 0, lower, 50, 25)
+            else:
+                return 50
+
+        def normalize(buy, sell, smooth, close_values):
+            os = 0
+            max_val = None
+            min_val = None
+            normalized_values = []
+
+            for i in range(len(close_values)):
+                previous_os = os
+
+                if buy[i]:
+                    os = 1
+                elif sell[i]:
+                    os = -1
+
+                if os > previous_os:
+                    max_val = close_values[i]
+                elif os < previous_os:
+                    pass
+                else:
+                    max_val = max(close_values[i], max_val) if max_val is not None else close_values[i]
+
+                if os < previous_os:
+                    min_val = close_values[i]
+                elif os > previous_os:
+                    pass
+                else:
+                    min_val = min(close_values[i], min_val) if min_val is not None else close_values[i]
+
+                if max_val is not None and min_val is not None and max_val != min_val:
+                    normalized_value = (close_values[i] - min_val) / (max_val - min_val) * 100
+                else:
+                    normalized_value = 0
+                normalized_values.append(normalized_value)
+
+            normalized_values_np = np.array(normalized_values, dtype=float)
+            smoothed_values = talib.SMA(normalized_values_np, timeperiod=smooth)
+            return smoothed_values.tolist()
+
+        def moving_average_value(source, length, ma_type):
+            if ma_type == "SMA":
+                return talib.SMA(source, timeperiod=length)
+            elif ma_type == "EMA":
+                return talib.EMA(source, timeperiod=length)
+            elif ma_type == "HMA":
+                half_length = int(length / 2)
+                sqrt_length = int(np.sqrt(length))
+                return talib.WMA(2 * talib.WMA(source, timeperiod=half_length) - talib.WMA(source, timeperiod=length), timeperiod=sqrt_length)
+            elif ma_type == "WMA":
+                return talib.WMA(source, timeperiod=length)
+            elif ma_type == "VWMA":
+                return (source * temp_data["Volume"]).rolling(window=length).sum() / temp_data["Volume"].rolling(window=length).sum()
+            else:
+                raise ValueError(f"Unsupported MA type: {ma_type}")
+
+        def linear_regression_score(close_values, lr_length):
+            lr_scores = []
+            for i in range(len(close_values)):
+                if i < lr_length:
+                    lr_scores.append(np.nan)
+                else:
+                    y = close_values[i - lr_length + 1 : i + 1]
+                    x = np.arange(len(y))
+                    slope, intercept, r_value, _, _ = linregress(x, y)
+                    lr_scores.append(50 * r_value + 50)
+            return lr_scores
+
+        # Indicator Calculations
+        # 1. RSI
+        rsi_length = 14
+        temp_data["RSI"] = talib.RSI(temp_data["Close"], timeperiod=rsi_length)
+        temp_data["RSI_Score"] = temp_data["RSI"].apply(lambda x: 
+            interpolate(x, 100, 70, 100, 75) if x > 70 else
+            interpolate(x, 70, 50, 75, 50) if x > 50 else
+            interpolate(x, 50, 30, 50, 25) if x > 30 else
+            interpolate(x, 30, 0, 25, 0))
+
+        # 2. Stochastic Oscillator (%K)
+        stoch_length_k = 14
+        stoch_smoothing_k = 3
+        temp_data["%K"], _ = talib.STOCH(
+            temp_data["High"], temp_data["Low"], temp_data["Close"],
+            fastk_period=stoch_length_k, slowk_period=stoch_smoothing_k, slowk_matype=0,
+            slowd_period=stoch_smoothing_k, slowd_matype=0
+        )
+        temp_data["%K_Score"] = temp_data["%K"].apply(lambda x: 
+            interpolate(x, 100, 80, 100, 75) if x > 80 else
+            interpolate(x, 80, 50, 75, 50) if x > 50 else
+            interpolate(x, 50, 20, 50, 25) if x > 20 else
+            interpolate(x, 20, 0, 25, 0))
+
+        # 3. Stochastic RSI
+        stoch_rsi_length = 14
+        stoch_rsi_smoothing_k = 3
+        rsi_values = talib.RSI(temp_data["Close"], timeperiod=stoch_rsi_length)
+        stoch_rsi_high = rsi_values.rolling(window=stoch_rsi_length).max()
+        stoch_rsi_low = rsi_values.rolling(window=stoch_rsi_length).min()
+        temp_data["Stoch_RSI_K"] = 100 * (rsi_values - stoch_rsi_low) / (stoch_rsi_high - stoch_rsi_low)
+        temp_data["Stoch_RSI_K"] = temp_data["Stoch_RSI_K"].rolling(window=stoch_rsi_smoothing_k, min_periods=1).mean()
+        temp_data["Stoch_RSI_Score"] = temp_data["Stoch_RSI_K"].apply(lambda x: 
+            interpolate(x, 100, 80, 100, 75) if x > 80 else
+            interpolate(x, 80, 50, 75, 50) if x > 50 else
+            interpolate(x, 50, 20, 50, 25) if x > 20 else
+            interpolate(x, 20, 0, 25, 0))
+
+        # 4. Commodity Channel Index (CCI)
+        cci_length = 20
+        temp_data["CCI"] = talib.CCI(temp_data["High"], temp_data["Low"], temp_data["Close"], timeperiod=cci_length)
+        temp_data["CCI_Score"] = temp_data["CCI"].apply(lambda x: 
+            interpolate(x, 300, 100, 100, 75) if x > 100 else
+            interpolate(x, 100, 0, 75, 50) if x >= 0 else
+            interpolate(x, -100, -300, 25, 0) if x < -100 else
+            interpolate(x, 0, -100, 50, 25))
+
+        # 5. Bull-Bear Power (BBP)
+        sma_length = 13
+        sma_13 = talib.SMA(temp_data["Close"], timeperiod=sma_length)
+        temp_data["BBP"] = (temp_data["High"] + temp_data["Low"]) - 2 * sma_13
+        bbp_std = temp_data["BBP"].rolling(window=sma_length).std()
+        bbp_sma = temp_data["BBP"].rolling(window=sma_length).mean()
+        temp_data["BBP_Upper"] = bbp_sma + 2 * bbp_std
+        temp_data["BBP_Lower"] = bbp_sma - 2 * bbp_std
+        temp_data["BBP_Score"] = temp_data.apply(
+            lambda row: calculate_bbp_score(row["BBP"], row["BBP_Upper"], row["BBP_Lower"]),
+            axis=1
+        )
+
+        # 6. Moving Average
+        ma_length = 20
+        ma_type = "SMA"
+        norm_smooth = 3
+        temp_data["MA"] = moving_average_value(temp_data["Close"], ma_length, ma_type)
+        buy_signal = temp_data["Close"] > temp_data["MA"]
+        sell_signal = temp_data["Close"] < temp_data["MA"]
+        temp_data["MA_Score"] = normalize(buy_signal, sell_signal, norm_smooth, temp_data["Close"])
+
+        # 7. VWAP
+        stdev_multiplier = 1.5
+        temp_data["Typical Price"] = (temp_data["High"] + temp_data["Low"] + temp_data["Close"]) / 3
+        temp_data["Cumulative TPxVolume"] = (temp_data["Typical Price"] * temp_data["Volume"]).cumsum()
+        temp_data["Cumulative Volume"] = temp_data["Volume"].cumsum()
+        temp_data["VWAP"] = temp_data["Cumulative TPxVolume"] / temp_data["Cumulative Volume"]
+        rolling_std = temp_data["Typical Price"].rolling(window=len(temp_data)).std()
+        temp_data["VWAP Upper"] = temp_data["VWAP"] + (rolling_std * stdev_multiplier)
+        temp_data["VWAP Lower"] = temp_data["VWAP"] - (rolling_std * stdev_multiplier)
+        buy_signals = temp_data["Close"] > temp_data["VWAP Upper"]
+        sell_signals = temp_data["Close"] < temp_data["VWAP Lower"]
+        temp_data["VWAP_Score"] = normalize(buy_signals, sell_signals, norm_smooth, temp_data["Close"].tolist())
+
+        # 8. Bollinger Bands
+        bb_length = 20
+        bb_mult = 2.0
+        temp_data["BB_Middle"], temp_data["BB_Upper"], temp_data["BB_Lower"] = talib.BBANDS(
+            temp_data["Close"], timeperiod=bb_length, nbdevup=bb_mult, nbdevdn=bb_mult, matype=0
+        )
+        buy_signals = temp_data["Close"] > temp_data["BB_Upper"]
+        sell_signals = temp_data["Close"] < temp_data["BB_Lower"]
+        temp_data["BB_Score"] = normalize(buy_signals, sell_signals, norm_smooth, temp_data["Close"].tolist())
+
+        # 9. Supertrend
+        atr_length = 10
+        st_factor = 3
+        atr = talib.ATR(temp_data["High"], temp_data["Low"], temp_data["Close"], timeperiod=atr_length)
+        hl2 = (temp_data["High"] + temp_data["Low"]) / 2
+        temp_data["Supertrend_Upper"] = hl2 + (st_factor * atr)
+        temp_data["Supertrend_Lower"] = hl2 - (st_factor * atr)
+        supertrend = [0] * len(temp_data)
+        direction = [0] * len(temp_data)
+        for i in range(len(temp_data)):
+            if i == 0:
+                supertrend[i] = temp_data["Supertrend_Upper"][i]
+                direction[i] = 1
+            else:
+                if direction[i - 1] == 1:
+                    if temp_data["Close"][i] < temp_data["Supertrend_Lower"][i]:
+                        direction[i] = -1
+                        supertrend[i] = temp_data["Supertrend_Lower"][i]
+                    else:
+                        direction[i] = 1
+                        supertrend[i] = min(temp_data["Supertrend_Upper"][i], supertrend[i - 1])
+                elif direction[i - 1] == -1:
+                    if temp_data["Close"][i] > temp_data["Supertrend_Upper"][i]:
+                        direction[i] = 1
+                        supertrend[i] = temp_data["Supertrend_Upper"][i]
+                    else:
+                        direction[i] = -1
+                        supertrend[i] = max(temp_data["Supertrend_Lower"][i], supertrend[i - 1])
+        temp_data["Supertrend"] = supertrend
+        temp_data["Direction"] = direction
+        temp_data["Buy_Signal"] = temp_data["Close"] > temp_data["Supertrend"]
+        temp_data["Sell_Signal"] = temp_data["Close"] < temp_data["Supertrend"]
+        temp_data["Supertrend_Score"] = normalize(
+            buy=temp_data["Buy_Signal"],
+            sell=temp_data["Sell_Signal"],
+            smooth=norm_smooth,
+            close_values=temp_data["Close"].tolist(),
+        )
+
+        # 10. Linear Regression
+        lr_length = 25
+        temp_data["Linear_Regression_Score"] = linear_regression_score(temp_data["Close"].values, lr_length)
+
+        # --- Overall Sentiment ---
+        pivot_length = 5
+        norm_smooth = 3
+
+        def pivot_high(prices, length):
+            return prices.rolling(window=length, center=True).apply(lambda x: x.argmax() == length // 2, raw=False)
+
+        def pivot_low(prices, length):
+            return prices.rolling(window=length, center=True).apply(lambda x: x.argmin() == length // 2, raw=False)
+
+        temp_data["Pivot_High"] = pivot_high(temp_data["Close"], pivot_length)
+        temp_data["Pivot_Low"] = pivot_low(temp_data["Close"], pivot_length)
+
+        ph_y = np.nan
+        pl_y = np.nan
+        ph_cross = False
+        pl_cross = False
+        bullish = []
+        bearish = []
+
+        for i in range(len(temp_data)):
+            bull = False
+            bear = False
+
+            if temp_data["Pivot_High"][i]:
+                ph_y = temp_data["Close"][i]
+                ph_cross = False
+
+            if temp_data["Pivot_Low"][i]:
+                pl_y = temp_data["Close"][i]
+                pl_cross = False
+
+            if temp_data["Close"][i] > ph_y and not ph_cross:
+                ph_cross = True
+                bull = True
+
+            if temp_data["Close"][i] < pl_y and not pl_cross:
+                pl_cross = True
+                bear = True
+
+            bullish.append(bull)
+            bearish.append(bear)
+
+        temp_data["Bullish"] = bullish
+        temp_data["Bearish"] = bearish
+
+        temp_data["Sentiment"] = normalize(temp_data["Bullish"], temp_data["Bearish"], norm_smooth, temp_data["Close"])
+
+        return temp_data
+    
+    temp_data = calculate_indicators_and_scores(temp_data)
+
+    dji_data = calculate_indicators_and_scores(dji_data)
+    nasdaq_data = calculate_indicators_and_scores(nasdaq_data)
+    s_and_p_500_data = calculate_indicators_and_scores(s_and_p_500_data)
+
+    # # Display final sentiment scores
+    # st.write(temp_data[["Datetime", "RSI_Score", "%K_Score", "Stoch_RSI_Score", "CCI_Score", "BBP_Score",
+    #                 "MA_Score", "VWAP_Score", "BB_Score", "Supertrend_Score", "Linear_Regression_Score", "Sentiment"]].tail(21))
+
+    st.write("Below is the Market sentiment with the latest time on 30 mins")
+    
+    temp_data_summary = {
+        "RSI_Score": temp_data.iloc[-1]['RSI_Score'],
+        "%K_Score": temp_data.iloc[-1]['%K_Score'],
+        "Stoch_RSI_Score": temp_data.iloc[-1]['Stoch_RSI_Score'],
+        "CCI_Score": temp_data.iloc[-1]['CCI_Score'],
+        "BBP_Score": temp_data.iloc[-1]['BBP_Score'],
+        "MA_Score": temp_data.iloc[-1]['MA_Score'],
+        "VWAP_Score": temp_data.iloc[-1]['VWAP_Score'],
+        "BB_Score": temp_data.iloc[-1]['BB_Score'],
+        "Supertrend_Score": temp_data.iloc[-1]['Supertrend_Score'],
+        "Linear_Regression_Score": temp_data.iloc[-1]['Linear_Regression_Score'],
+        "Sentiment": temp_data.iloc[-1]['Sentiment'],
+    }
+
+    # Extract scalar values directly
+    bar_labels = [
+        'RSI', '%K', 'Stoch RSI', 'CCI', 'BBP', 'MA', 'VWAP', 'BB', 'ST', 'REG'
+    ]
+    bar_values = [
+        temp_data_summary["RSI_Score"], temp_data_summary["%K_Score"], temp_data_summary["Stoch_RSI_Score"],
+        temp_data_summary["CCI_Score"], temp_data_summary["BBP_Score"], temp_data_summary["MA_Score"],
+        temp_data_summary["VWAP_Score"], temp_data_summary["BB_Score"], temp_data_summary["Supertrend_Score"],
+        temp_data_summary["Linear_Regression_Score"]
+    ]
+    sentiment_value = temp_data_summary["Sentiment"]
+
+    # Create the bar chart figure
+    fig = go.Figure()
+
+    # Bar chart for indicators
+    fig.add_trace(go.Bar(
+        x=bar_labels,
+        y=bar_values,
+        marker_color=[
+            'red' if v < 50 else 'blue' if v > 50 else 'gray' for v in bar_values
+        ],
+        name='Indicators'
+    ))
+
+    # Adding threshold lines
+    fig.add_hline(y=75, line_dash='dash', line_color='blue', annotation_text="Overbought (75)", annotation_position="top left")
+    fig.add_hline(y=50, line_dash='dash', line_color='gray', annotation_text="Neutral (50)", annotation_position="bottom right")
+    fig.add_hline(y=25, line_dash='dash', line_color='red', annotation_text="Oversold (25)", annotation_position="bottom left")
+
+    # Adding text labels for each bar
+    for i, v in enumerate(bar_values):
+        fig.add_trace(go.Scatter(
+            x=[bar_labels[i]],
+            y=[v + 2],  # Position slightly above the bar
+            text=[f"{v:.1f}"],
+            mode='text',
+            showlegend=False
+        ))
+
+    # Update layout for the bar chart
+    fig.update_layout(
+        title_text='Market Sentiment Indicators',
+        yaxis_title='Scores',
+        height=400,
+        width=1200,
+        bargap=0.2,
+        template="plotly_dark"
+    )
+
+    # Display the bar chart in Streamlit
+    st.plotly_chart(fig, use_container_width=True)
+
+    # Create the sentiment gauge figure
+    gauge_fig = go.Figure()
+
+    # Sentiment gauge
+    gauge_fig.add_trace(go.Indicator(
+        mode="gauge+number",
+        value=sentiment_value,
+        title={'text': "Market Sentiment"},
+        gauge={
+            'axis': {'range': [-90, 90]},
+            'bar': {'color': "blue" if sentiment_value > 50 else "red"},
+            'steps': [
+                {'range': [-90, -30], 'color': "red"},
+                {'range': [-30, 30], 'color': "gray"},
+                {'range': [30, 90], 'color': "blue"}
+            ],
+            'threshold': {
+                'line': {'color': "black", 'width': 4},
+                'thickness': 0.75,
+                'value': sentiment_value
+            }
+        }
+    ))
+
+    # Update layout for the sentiment gauge
+    gauge_fig.update_layout(
+        height=400,
+        width=600,
+        template="plotly_dark",
+        title_text="Market Sentiment Gauge"
+    )
+
+    # Display the sentiment gauge in Streamlit
+    st.plotly_chart(gauge_fig, use_container_width=True)
+
     # st.write(data)
 
-    # Section 2: True Range and ATR Calculations
-    def calculate_atr(data, atr_period=14):
-        data['H-L'] = data['High'] - data['Low']
-        data['H-PC'] = np.abs(data['High'] - data['Adj Close'].shift(1))
-        data['L-PC'] = np.abs(data['Low'] - data['Adj Close'].shift(1))
-        data['TR'] = data[['H-L', 'H-PC', 'L-PC']].max(axis=1)
-        data['ATR_14'] = data['TR'].ewm(alpha=1/atr_period, adjust=False).mean()
-        return data
+    # # Section 2: True Range and ATR Calculations
+    # def calculate_atr(data, atr_period=14):
+    #     data['H-L'] = data['High'] - data['Low']
+    #     data['H-PC'] = np.abs(data['High'] - data['Adj Close'].shift(1))
+    #     data['L-PC'] = np.abs(data['Low'] - data['Adj Close'].shift(1))
+    #     data['TR'] = data[['H-L', 'H-PC', 'L-PC']].max(axis=1)
+    #     data['ATR_14'] = data['TR'].ewm(alpha=1/atr_period, adjust=False).mean()
+    #     return data
 
-    data = calculate_atr(data)
+    # data = calculate_atr(data)
 
+    # The above code snippet is written in Python and it appears to be fetching daily data using the
+    # `yf.download` function to calculate the Average True Range (ATR) for daily intervals. The
+    # `ticker` variable is likely representing the stock symbol or financial instrument for which the
+    # data is being fetched. The data is being fetched for a period of 60 days with a daily interval
+    # of 1 day. The fetched data is then reset to have a clean index.
     # Fetch daily data to calculate ATR for daily intervals
     daily_data = yf.download(ticker, period="60d", interval="1d").reset_index()
-    daily_data['H-L'] = daily_data['High'] - daily_data['Low']
-    daily_data['H-PC'] = np.abs(daily_data['High'] - daily_data['Adj Close'].shift(1))
-    daily_data['L-PC'] = np.abs(daily_data['Low'] - daily_data['Adj Close'].shift(1))
-    daily_data['TR'] = daily_data[['H-L', 'H-PC', 'L-PC']].max(axis=1)
-    daily_data['ATR_14_1_day'] = daily_data['TR'].ewm(alpha=1/14, adjust=False).mean()
+    # daily_data['H-L'] = daily_data['High'] - daily_data['Low']
+    # daily_data['H-PC'] = np.abs(daily_data['High'] - daily_data['Adj Close'].shift(1))
+    # daily_data['L-PC'] = np.abs(daily_data['Low'] - daily_data['Adj Close'].shift(1))
+    # daily_data['TR'] = daily_data[['H-L', 'H-PC', 'L-PC']].max(axis=1)
+    # daily_data['ATR_14_1_day'] = daily_data['TR'].ewm(alpha=1/14, adjust=False).mean()
+    # daily_data['Prev_Day_ATR_14_1_Day'] = daily_data['ATR_14_1_day'].shift(1)
+    # daily_data['Date'] = pd.to_datetime(daily_data['Date']).dt.date
+    # st.write(data)
+    data['Date'] = pd.to_datetime(data['Datetime']).dt.date
+    # # Convert 'Date' column in both dataframes to datetime format
+    data['Date'] = pd.to_datetime(data['Date'])
+    daily_data['Date'] = pd.to_datetime(daily_data['Date'])
+
+    # Calculate ATR for 30-minute and daily intervals using TA-Lib
+    atr_period = 14
+
+    # ATR for daily data using TA-Lib
+    daily_data['ATR_14_1_day'] = talib.ATR(daily_data['High'], daily_data['Low'], daily_data['Close'], timeperiod=atr_period)
     daily_data['Prev_Day_ATR_14_1_Day'] = daily_data['ATR_14_1_day'].shift(1)
-    daily_data['Date'] = pd.to_datetime(daily_data['Date']).dt.date
+
+    # Merge ATR from daily data into 30-minute data
+    final_data = pd.merge(data, daily_data[['Date', 'ATR_14_1_day', 'Prev_Day_ATR_14_1_Day']], on='Date', how='left')
+
+    # Calculate ATR for 30-minute data using TA-Lib
+    final_data['ATR_14_30_mins'] = talib.ATR(final_data['High'], final_data['Low'], final_data['Close'], timeperiod=atr_period)
+
+    final_data['ATR'] = final_data['ATR_14_30_mins']
+
+    # Drop unnecessary columns from earlier calculations
+    final_data = final_data.drop(['H-L', 'H-PC', 'L-PC', 'TR'], axis=1, errors='ignore')
 
     # Merge ATR into 30-minute data
-    data['Date'] = pd.to_datetime(data['Datetime']).dt.date
+    
     final_data = pd.merge(data, daily_data[['Date', 'ATR_14_1_day', 'Prev_Day_ATR_14_1_Day']], on='Date', how='left')
+
+    # st.write(final_data)
+
+    # Ensure 'Datetime' is in datetime format
+    final_data['Datetime'] = pd.to_datetime(final_data['Datetime'])
+    final_data = final_data.sort_values('Datetime',ascending=True)
+
+    final_data['Close'] = pd.to_numeric(final_data['Close'], errors='coerce')
+
+    # # Convert 'Close' to NumPy array of floats
+    # close_prices = final_data['Close'].astype(float).values
+
+    # # Calculate SMA using TA-Lib
+    # final_data['MA_20'] = talib.SMA(close_prices, timeperiod=20)
 
     # Calculate Moving Average (MA)
     final_data['MA_20'] = final_data['Close'].rolling(window=20).mean()
+    # # Calculate Moving Average (MA) using TA-Lib
+    # final_data['MA_20'] = talib.SMA(final_data['Close'], timeperiod=20)
 
-    # Calculate Relative Strength Index (RSI)
-    delta = final_data['Close'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-    final_data['RSI'] = 100 - (100 / (1 + gain / loss))
+    # # Calculate Relative Strength Index (RSI)
+    # delta = final_data['Close'].diff()
+    # gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+    # loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+    # final_data['RSI'] = 100 - (100 / (1 + gain / loss))
 
-    # Calculate Moving Average Convergence Divergence (MACD)
-    short_ema = final_data['Close'].ewm(span=12, adjust=False).mean()
-    long_ema = final_data['Close'].ewm(span=26, adjust=False).mean()
-    final_data['MACD'] = short_ema - long_ema
-    final_data['Signal Line'] = final_data['MACD'].ewm(span=9, adjust=False).mean()
+    # Calculate RSI using TA-Lib with a 14-day period
+    final_data['RSI'] = talib.RSI(final_data['Close'], timeperiod=14)
 
-    # Calculate Bollinger Bands
-    final_data['MA_20'] = final_data['Close'].rolling(window=20).mean()
-    final_data['Bollinger_Upper'] = final_data['MA_20'] + (final_data['Close'].rolling(window=20).std() * 2)
-    final_data['Bollinger_Lower'] = final_data['MA_20'] - (final_data['Close'].rolling(window=20).std() * 2)
 
-    # Calculate Volume Weighted Average Price (VWAP)
-    final_data['VWAP'] = (final_data['Volume'] * (final_data['High'] + final_data['Low'] + final_data['Close']) / 3).cumsum() / final_data['Volume'].cumsum()
+    # # Calculate Moving Average Convergence Divergence (MACD)
+    # short_ema = final_data['Close'].ewm(span=12, adjust=False).mean()
+    # long_ema = final_data['Close'].ewm(span=26, adjust=False).mean()
+    # final_data['MACD'] = short_ema - long_ema
+    # final_data['Signal Line'] = final_data['MACD'].ewm(span=9, adjust=False).mean()
 
-    # Calculate Fibonacci Retracement Levels (use high and low from a specific range if applicable)
-    highest = final_data['High'].max()
-    lowest = final_data['Low'].min()
-    final_data['Fib_38.2'] = highest - (highest - lowest) * 0.382
-    final_data['Fib_50'] = (highest + lowest) / 2
-    final_data['Fib_61.8'] = highest - (highest - lowest) * 0.618
+    # # Calculate Bollinger Bands
+    # final_data['MA_20'] = final_data['Close'].rolling(window=20).mean()
+    # final_data['Bollinger_Upper'] = final_data['MA_20'] + (final_data['Close'].rolling(window=20).std() * 2)
+    # final_data['Bollinger_Lower'] = final_data['MA_20'] - (final_data['Close'].rolling(window=20).std() * 2)
+
+    # Calculate Moving Average Convergence Divergence (MACD) using TA-Lib
+    final_data['MACD'], final_data['Signal Line'], _ = talib.MACD(final_data['Close'], fastperiod=12, slowperiod=26, signalperiod=9)
+
+    # Calculate Bollinger Bands using TA-Lib
+    final_data['MA_20_BB'], final_data['Bollinger_Upper'], final_data['Bollinger_Lower'] = talib.BBANDS(
+        final_data['Close'], timeperiod=20, nbdevup=2, nbdevdn=2, matype=0
+    )
+
+
+    final_data['Date'] = pd.to_datetime(final_data['Date'])
+
+    # # Calculate Volume Weighted Average Price (VWAP)
+    # final_data['VWAP'] = (final_data['Volume'] * (final_data['High'] + final_data['Low'] + final_data['Close']) / 3).cumsum() / final_data['Volume'].cumsum()
+
+    # # Calculate Fibonacci Retracement Levels (use high and low from a specific range if applicable)
+    # highest = final_data['High'].max()
+    # lowest = final_data['Low'].min()
+    # final_data['Fib_38.2'] = highest - (highest - lowest) * 0.382
+    # final_data['Fib_50'] = (highest + lowest) / 2
+    # final_data['Fib_61.8'] = highest - (highest - lowest) * 0.618
+
+    # Define a function to calculate VWAP for each group
+    def calculate_vwap(df):
+        typical_price = (df['High'] + df['Low'] + df['Close']) / 3
+        vwap = (typical_price * df['Volume']).cumsum() / df['Volume'].cumsum()
+        return vwap
+
+    grouped = final_data.groupby(final_data['Date'].dt.date)
+
+    # Apply the VWAP calculation for each group
+    final_data['VWAP'] = grouped.apply(lambda x: calculate_vwap(x)).reset_index(level=0, drop=True)
+
+    # Extract the date part to group the data by day
+    final_data['Only_Date'] = final_data['Date'].dt.date
+
+    # Calculate daily high and low values from the 30-minute data
+    daily_high_low = final_data.groupby('Only_Date').agg({'High': 'max', 'Low': 'min'}).reset_index()
+
+    # Add the previous day's high and low to the 30-minute data
+    daily_high_low['Previous_High'] = daily_high_low['High'].shift(1)
+    daily_high_low['Previous_Low'] = daily_high_low['Low'].shift(1)
+
+    # Merge the previous high and low values into the original 30-minute data
+    final_data = final_data.merge(daily_high_low[['Only_Date', 'Previous_High', 'Previous_Low']], 
+                                        left_on='Only_Date', right_on='Only_Date', how='left')
+
+    # Calculate Fibonacci retracement levels for each 30-minute interval based on the previous day's high and low
+    final_data['Fib_38.2'] = final_data['Previous_High'] - (final_data['Previous_High'] - final_data['Previous_Low']) * 0.382
+    final_data['Fib_50'] = (final_data['Previous_High'] + final_data['Previous_Low']) / 2
+    final_data['Fib_61.8'] = final_data['Previous_High'] - (final_data['Previous_High'] - final_data['Previous_Low']) * 0.618
+
+    # Drop unnecessary columns
+    final_data.drop(['Previous_High', 'Previous_Low'], axis=1, inplace=True)
+
+    # Calculate Average True Range (ATR) using TA-Lib (already done above)
+    # final_poc_data['ATR'] is equivalent to 'ATR_14_30_mins'
+
+    
 
     # Calculate Average True Range (ATR)
     high_low = final_data['High'] - final_data['Low']
@@ -293,11 +1069,22 @@ elif tab == "Chat Interface":
     # Calculate Stochastic Oscillator
     final_data['14-high'] = final_data['High'].rolling(window=14).max()
     final_data['14-low'] = final_data['Low'].rolling(window=14).min()
-    final_data['%K'] = (final_data['Close'] - final_data['14-low']) * 100 / (final_data['14-high'] - final_data['14-low'])
-    final_data['%D'] = final_data['%K'].rolling(window=3).mean()
 
-    # Calculate Parabolic SAR (for simplicity, this example uses a fixed acceleration factor)
-    final_data['PSAR'] = final_data['Close'].shift() + (0.02 * (final_data['High'] - final_data['Low']))
+
+    # final_data['%K'] = (final_data['Close'] - final_data['14-low']) * 100 / (final_data['14-high'] - final_data['14-low'])
+    # final_data['%D'] = final_data['%K'].rolling(window=3).mean()
+
+    # # Calculate Parabolic SAR (for simplicity, this example uses a fixed acceleration factor)
+    # final_data['PSAR'] = final_data['Close'].shift() + (0.02 * (final_data['High'] - final_data['Low']))
+
+    # Calculate Stochastic Oscillator using TA-Lib
+    final_data['%K'], final_data['%D'] = talib.STOCH(
+        final_data['High'], final_data['Low'], final_data['Close'],
+        fastk_period=14, slowk_period=3, slowk_matype=0, slowd_period=3, slowd_matype=0
+    )
+
+    # Calculate Parabolic SAR using TA-Lib
+    final_data['PSAR'] = talib.SAR(final_data['High'], final_data['Low'], acceleration=0.02, maximum=0.2)
 
     # st.write(final_data)
 
@@ -464,6 +1251,8 @@ elif tab == "Chat Interface":
     # Get the unique dates and sort them
     sorted_dates = sorted(set(final_data['Date']))
     final_data['2 Day VAH and VAL'] = ''
+    # final_data['Previous Initial Market Profile Shape'] = ''
+    # final_data['Previous Refined Market Profile Shape'] = ''
 
     # Use a for loop with range() to iterate over the sorted dates by index
     for i in range(2, len(sorted_dates)):
@@ -520,6 +1309,16 @@ elif tab == "Chat Interface":
                 final_day_type = 'Small Range Non Trend Variation Day'
             else:
                 final_day_type = ''
+            
+            # if last_row['POC'] > last_row['VAH']:
+            #     previous_day_shape = "P-shape (Bullish Accumulation)"
+            # elif last_row['POC'] < last_row['VAL']:
+            #     previous_day_shape = "b-shape (Bearish Accumulation)"
+            # elif last_row['VAH'] > last_row['POC'] > last_row['VAL']:
+            #     previous_day_shape = "D-shape (Balanced Market)"
+            # else:
+            #     previous_day_shape = "B-shape (Double Distribution)"
+
 
 
         # Print or perform further operations with actions
@@ -527,6 +1326,66 @@ elif tab == "Chat Interface":
 
         final_data.loc[final_data['Date'] == previous_date, '2 Day VAH and VAL'] = str(actions)
         final_data.loc[final_data['Date'] == previous_date, 'Adjusted Day Type'] = str(final_day_type)
+        # final_data.loc[final_data['Date'] == previous_date, 'Previous Initial Market Profile Shape'] = str(previous_day_shape)
+
+    st.write("final_data")
+
+    # st.write(dji_data.columns)
+
+    dji_data = dji_data[['Datetime','Open','High','Low','Close','Volume','RSI_Score','%K_Score','Stoch_RSI_Score','CCI_Score','BBP_Score','MA_Score','VWAP_Score','BB_Score','Supertrend_Score','Linear_Regression_Score','Sentiment']]
+    nasdaq_data = nasdaq_data[['Datetime','Open','High','Low','Close','Volume','RSI_Score','%K_Score','Stoch_RSI_Score','CCI_Score','BBP_Score','MA_Score','VWAP_Score','BB_Score','Supertrend_Score','Linear_Regression_Score','Sentiment']]
+    s_and_p_500_data = s_and_p_500_data[['Datetime','Open','High','Low','Close','Volume','RSI_Score','%K_Score','Stoch_RSI_Score','CCI_Score','BBP_Score','MA_Score','VWAP_Score','BB_Score','Supertrend_Score','Linear_Regression_Score','Sentiment']]
+
+    # Rename columns in dji_data to add '_dji' suffix except for the 'Datetime' column
+    dji_data = dji_data.rename(columns={col: f"{col}_dji" for col in dji_data.columns if col != 'Datetime'})
+    nasdaq_data = nasdaq_data.rename(columns={col: f"{col}_nasdaq" for col in nasdaq_data.columns if col != 'Datetime'})
+    s_and_p_500_data = s_and_p_500_data.rename(columns={col: f"{col}_s_and_p_500" for col in s_and_p_500_data.columns if col != 'Datetime'})
+    
+    # Merge both dataframes on the "Datetime" column
+    merged_data = pd.merge(final_data, dji_data, on='Datetime')
+    merged_data = pd.merge(merged_data, nasdaq_data, on='Datetime')
+    merged_data = pd.merge(merged_data, s_and_p_500_data, on='Datetime')
+
+    final_data = merged_data.copy()
+    
+    st.write(final_data)
+
+    # # Initial quick identification of market profile shape based on POC, VAH, and VAL
+    # def quick_identify_profile_shape(vah, val, poc):
+    #     if poc > vah:
+    #         return "P-shape (Bullish Accumulation)"
+    #     elif poc < val:
+    #         return "b-shape (Bearish Accumulation)"
+    #     elif vah > poc > val:
+    #         return "D-shape (Balanced Market)"
+    #     else:
+    #         return "B-shape (Double Distribution)"
+
+    # # Refine the initial guess with skewness and kurtosis
+    # def refine_with_skew_kurtosis(volume_profile, shape_guess):
+    #     volumes = volume_profile['Total Volume'].values
+    #     skewness = skew(volumes)
+    #     kurt = kurtosis(volumes)
+
+    #     if shape_guess == "P-shape" and skewness < 0:
+    #         return "b-shape (Bearish Accumulation)"
+    #     if shape_guess == "b-shape" and skewness > 0:
+    #         return "P-shape (Bullish Accumulation)"
+
+    #     if shape_guess == "D-shape" and abs(skewness) > 0.5 and kurt > 0:
+    #         return "B-shape (Double Distribution)"
+
+    #     return shape_guess
+
+    # # Calculate the volume profile
+    # volume_profile = calculate_volume_profile(data, row_layout=24)
+    # vah, val, poc = calculate_vah_val_poc(volume_profile)
+
+    # # Initial shape identification
+    # initial_shape = quick_identify_profile_shape(vah, val, poc)
+
+    # # Refined shape identification
+    # refined_shape = refine_with_skew_kurtosis(volume_profile, initial_shape)
 
 
     # Create a 'casted_date' column to only capture the date part of the Datetime
@@ -538,6 +1397,8 @@ elif tab == "Chat Interface":
     # Create a 'casted_date' column to only capture the date part of the Datetime
     final_data['casted_date'] = final_data['Date']
 
+    final_data['casted_date'] = final_data['casted_date'].dt.date
+
     # Get a sorted list of unique dates
     sorted_dates = sorted(final_data['casted_date'].unique())
 
@@ -547,12 +1408,18 @@ elif tab == "Chat Interface":
     # Determine the previous date if it exists
     previous_date = sorted_dates[current_date_index - 1] if current_date_index and current_date_index > 0 else None
 
-
+    # st.write(input_date)
+    
     # Filter based on the input date (input_date) from the sidebar
     filtered_data = final_data[final_data['casted_date'] == input_date]
 
+    # st.write(final_data.tail())
+    # st.write(len(filtered_data))
+
     # Filter based on the input date (input_date) from the sidebar
     previous_filtered_data = final_data[final_data['casted_date'] == previous_date]
+    # st.write(previous_date)
+    # st.write(len(previous_filtered_data))
     # st.write(filtered_data.columns)
 
     # Section 7: Display the Data for Selected Date
@@ -690,7 +1557,7 @@ elif tab == "Chat Interface":
                 "Accept-Language": "en-GB,en-US;q=0.9,en;q=0.8",
                 "Cache-Control": "no-cache",
                 "Pragma": "no-cache",
-                "Referer": "https://www.barchart.com/stocks/quotes/TSLA/interactive-chart/new",
+                "Referer": f"https://www.barchart.com/stocks/quotes/{ticker}/interactive-chart/new",
                 "Sec-Fetch-Dest": "empty",
                 "Sec-Fetch-Mode": "cors",
                 "Sec-Fetch-Site": "same-origin",
@@ -736,7 +1603,7 @@ elif tab == "Chat Interface":
     #         st.write("Cookies:", cookies)
 
             # Base URL and parameters
-            BASE_URL = "https://www.barchart.com/proxies/timeseries/historical/queryminutes.ashx?symbol=TSLA&interval=30&maxrecords=640&volume=contract&order=asc&dividends=false&backadjust=false&daystoexpiration=1&contractroll=combined"
+            BASE_URL = f"https://www.barchart.com/proxies/timeseries/historical/queryminutes.ashx?symbol={ticker}&interval=30&maxrecords=640&volume=contract&order=asc&dividends=false&backadjust=false&daystoexpiration=1&contractroll=combined"
 
 
             response = requests.get(BASE_URL, headers=headers, cookies=cookies)
@@ -833,117 +1700,750 @@ elif tab == "Chat Interface":
 
             data = merged_data.copy()
 
-            # Parameters for TPO calculation
-            value_area_percent = 70
-            tick_size = 0.01  # Tick size as per the image
+            # # Parameters for TPO calculation
+            # value_area_percent = 70
+            # tick_size = 0.01  # Tick size as per the image
 
-            # Calculate ATR for 30-minute and daily intervals
-            atr_period = 14
+            # # Calculate ATR for 30-minute and daily intervals
+            # atr_period = 14
 
-            # True Range Calculation for 30-minute data
-            data['H-L'] = data['High'] - data['Low']
-            data['H-PC'] = np.abs(data['High'] - data['Close'].shift(1))
-            data['L-PC'] = np.abs(data['Low'] - data['Close'].shift(1))
-            data['TR'] = data[['H-L', 'H-PC', 'L-PC']].max(axis=1)
+            # # True Range Calculation for 30-minute data
+            # data['H-L'] = data['High'] - data['Low']
+            # data['H-PC'] = np.abs(data['High'] - data['Close'].shift(1))
+            # data['L-PC'] = np.abs(data['Low'] - data['Close'].shift(1))
+            # data['TR'] = data[['H-L', 'H-PC', 'L-PC']].max(axis=1)
 
-            # ATR for 30-minute data
-            data['ATR_14_30_mins'] = data['TR'].ewm(alpha=1/atr_period, adjust=False).mean()
+            # # ATR for 30-minute data
+            # data['ATR_14_30_mins'] = data['TR'].ewm(alpha=1/atr_period, adjust=False).mean()
 
 
 
-            # # Fetch daily data for Apple to calculate daily ATR
-            # daily_data = yf.download(ticker, period="60d", interval="1d")
+            # # # Fetch daily data for Apple to calculate daily ATR
+            # # daily_data = yf.download(ticker, period="60d", interval="1d")
 
-            start_date = start_date_str
-            end_date = datetime.today().strftime('%Y-%m-%d')
+            # start_date = start_date_str
+            # end_date = datetime.today().strftime('%Y-%m-%d')
 
-            # Download data from start_date until today
-            daily_data = yf.download(ticker, start=start_date, end=end_date, interval="1d")
+            # # Download data from start_date until today
+            # daily_data = yf.download(ticker, start=start_date, end=end_date, interval="1d")
 
-            # Reset index to ensure 'Date' is a column, not an index
-            daily_data = daily_data.reset_index()
+            # # Reset index to ensure 'Date' is a column, not an index
+            # daily_data = daily_data.reset_index()
 
-            # True Range Calculation for daily data
-            daily_data['H-L'] = daily_data['High'] - daily_data['Low']
-            daily_data['H-PC'] = np.abs(daily_data['High'] - daily_data['Close'].shift(1))
-            daily_data['L-PC'] = np.abs(daily_data['Low'] - daily_data['Close'].shift(1))
-            daily_data['TR'] = daily_data[['H-L', 'H-PC', 'L-PC']].max(axis=1)
-            daily_data['ATR_14_1_day'] = daily_data['TR'].ewm(alpha=1/atr_period, adjust=False).mean()
-            # Shift the ATR to get the previous day's ATR
-            daily_data['Prev_Day_ATR_14_1_Day'] = daily_data['ATR_14_1_day'].shift(1)
+            # # True Range Calculation for daily data
+            # daily_data['H-L'] = daily_data['High'] - daily_data['Low']
+            # daily_data['H-PC'] = np.abs(daily_data['High'] - daily_data['Close'].shift(1))
+            # daily_data['L-PC'] = np.abs(daily_data['Low'] - daily_data['Close'].shift(1))
+            # daily_data['TR'] = daily_data[['H-L', 'H-PC', 'L-PC']].max(axis=1)
+            # daily_data['ATR_14_1_day'] = daily_data['TR'].ewm(alpha=1/atr_period, adjust=False).mean()
+            # # Shift the ATR to get the previous day's ATR
+            # daily_data['Prev_Day_ATR_14_1_Day'] = daily_data['ATR_14_1_day'].shift(1)
 
-            # Ensure consistent date format
-            data['Date'] = pd.to_datetime(data['Datetime']).dt.date
-            daily_data['Date'] = pd.to_datetime(daily_data['Date']).dt.date
+            # # Ensure consistent date format
+            # data['Date'] = pd.to_datetime(data['Datetime']).dt.date
+            # daily_data['Date'] = pd.to_datetime(daily_data['Date']).dt.date
 
-            # Merge ATR from daily data into 30-minute data
-            final_data = pd.merge(data, daily_data[['Date', 'ATR_14_1_day','Prev_Day_ATR_14_1_Day']], on='Date', how='left')
+            # # Merge ATR from daily data into 30-minute data
+            # final_data = pd.merge(data, daily_data[['Date', 'ATR_14_1_day','Prev_Day_ATR_14_1_Day']], on='Date', how='left')
 
-            final_data = final_data.drop(['H-L', 'H-PC','L-PC','TR'], axis=1)
+            # final_data = final_data.drop(['H-L', 'H-PC','L-PC','TR'], axis=1)
 
-            # Round all columns to 2 decimal places
-            final_data = final_data.round(2)
+            # # Round all columns to 2 decimal places
+            # final_data = final_data.round(2)
 
-            # TPO Profile Calculation
-            def calculate_tpo(data, tick_size, value_area_percent):
-                price_levels = np.arange(data['Low'].min(), data['High'].max(), tick_size)
+            # # TPO Profile Calculation
+            # def calculate_tpo(data, tick_size, value_area_percent):
+            #     price_levels = np.arange(data['Low'].min(), data['High'].max(), tick_size)
+            #     tpo_counts = defaultdict(list)
+            #     letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'
+            #     letter_idx = 0
+
+            #     for _, row in data.iterrows():
+            #         current_letter = letters[letter_idx % len(letters)]
+            #         for price in price_levels:
+            #             if row['Low'] <= price <= row['High']:
+            #                 tpo_counts[price].append(current_letter)
+            #         letter_idx += 1
+
+            #     total_tpo = sum(len(counts) for counts in tpo_counts.values())
+            #     value_area_target = total_tpo * value_area_percent / 100
+
+            #     sorted_tpo = sorted(tpo_counts.items(), key=lambda x: len(x[1]), reverse=True)
+            #     value_area_tpo = 0
+            #     value_area_high = 0
+            #     value_area_low = float('inf')
+
+            #     for price, counts in sorted_tpo:
+            #         if value_area_tpo + len(counts) <= value_area_target:
+            #             value_area_tpo += len(counts)
+            #             value_area_high = max(value_area_high, price)
+            #             value_area_low = min(value_area_low, price)
+            #         else:
+            #             break
+
+            #     poc = sorted_tpo[0][0]  # Price with highest TPO count
+            #     vah = value_area_high
+            #     val = value_area_low
+
+            #     return tpo_counts, poc, vah, val
+
+            # # Group by date and calculate TPO profile for each day
+            # daily_tpo_profiles = []
+
+            # for date, group in final_data.groupby('Date'):
+            #     tpo_counts, poc, vah, val = calculate_tpo(group, tick_size, value_area_percent)
+
+            #     # Calculate Initial Balance Range (IBR)
+            #     initial_balance_high = group['High'].iloc[:2].max()  # First 2 half-hour periods (1 hour)
+            #     initial_balance_low = group['Low'].iloc[:2].min()
+            #     initial_balance_range = initial_balance_high - initial_balance_low
+
+            #     # Calculate day's total range
+            #     day_range = group['High'].max() - group['Low'].min()
+            #     range_extension = day_range - initial_balance_range
+
+            #     # Identify Single Prints
+            #     single_prints = [round(price, 2) for price, counts in tpo_counts.items() if len(counts) == 1]
+
+            #     # Identify Poor Highs and Poor Lows
+            #     high_price = group['High'].max()
+            #     low_price = group['Low'].min()
+            #     poor_high = len(tpo_counts[high_price]) > 1
+            #     poor_low = len(tpo_counts[low_price]) > 1
+
+            #     # Classify the day
+            #     if day_range <= initial_balance_range * 1.15:
+            #         day_type = 'Normal Day'
+            #     elif initial_balance_range < day_range <= initial_balance_range * 2:
+            #         day_type = 'Normal Variation Day'
+            #     elif day_range > initial_balance_range * 2:
+            #         day_type = 'Trend Day'
+            #     else:
+            #         day_type = 'Neutral Day'
+
+            #     if last_row['Close'] >= initial_balance_high:
+            #         close_type = 'Closed above Initial High'
+            #     elif last_row['Close'] <= initial_balance_low:
+            #         close_type = 'Closed below Initial Low'
+            #     else:
+            #         close_type = 'Closed between Initial High and Low'
+
+
+            #     # Store the results in a dictionary
+            #     tpo_profile = {
+            #         'Date': date,
+            #         'POC': round(poc, 2),
+            #         'VAH': round(vah, 2),
+            #         'VAL': round(val, 2),
+            #         'Initial Balance High': round(initial_balance_high, 2),
+            #         'Initial Balance Low': round(initial_balance_low, 2),
+            #         'Initial Balance Range': round(initial_balance_range, 2),
+            #         'Day Range': round(day_range, 2),
+            #         'Range Extension': round(range_extension, 2),
+            #         'Day Type': day_type,
+            #         'Single Prints': single_prints,
+            #         'Poor High': poor_high,
+            #         'Poor Low': poor_low,
+            #         'Close Type' : close_type
+            #     }
+            #     daily_tpo_profiles.append(tpo_profile)
+
+            # # Convert the list of dictionaries to a DataFrame
+            # tpo_profiles_df = pd.DataFrame(daily_tpo_profiles)
+
+            # # Merge TPO profile data into final_data based on the 'Date'
+            # final_data = pd.merge(final_data, tpo_profiles_df, on='Date', how='left')
+
+            # # Calculate Moving Average (MA)
+            # final_data['MA_20'] = final_data['Close'].rolling(window=20).mean()
+
+            # # Calculate Relative Strength Index (RSI)
+            # delta = final_data['Close'].diff()
+            # gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+            # loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+            # final_data['RSI'] = 100 - (100 / (1 + gain / loss))
+
+            # # Calculate Moving Average Convergence Divergence (MACD)
+            # short_ema = final_data['Close'].ewm(span=12, adjust=False).mean()
+            # long_ema = final_data['Close'].ewm(span=26, adjust=False).mean()
+            # final_data['MACD'] = short_ema - long_ema
+            # final_data['Signal Line'] = final_data['MACD'].ewm(span=9, adjust=False).mean()
+
+            # # Calculate Bollinger Bands
+            # final_data['MA_20'] = final_data['Close'].rolling(window=20).mean()
+            # final_data['Bollinger_Upper'] = final_data['MA_20'] + (final_data['Close'].rolling(window=20).std() * 2)
+            # final_data['Bollinger_Lower'] = final_data['MA_20'] - (final_data['Close'].rolling(window=20).std() * 2)
+
+            # # Calculate Volume Weighted Average Price (VWAP)
+            # final_data['VWAP'] = (final_data['Volume'] * (final_data['High'] + final_data['Low'] + final_data['Close']) / 3).cumsum() / final_data['Volume'].cumsum()
+
+            # # Calculate Fibonacci Retracement Levels (use high and low from a specific range if applicable)
+            # highest = final_data['High'].max()
+            # lowest = final_data['Low'].min()
+            # final_data['Fib_38.2'] = highest - (highest - lowest) * 0.382
+            # final_data['Fib_50'] = (highest + lowest) / 2
+            # final_data['Fib_61.8'] = highest - (highest - lowest) * 0.618
+
+            # # Calculate Average True Range (ATR)
+            # high_low = final_data['High'] - final_data['Low']
+            # high_close = np.abs(final_data['High'] - final_data['Close'].shift())
+            # low_close = np.abs(final_data['Low'] - final_data['Close'].shift())
+            # true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+            # final_data['ATR'] = true_range.rolling(window=14).mean()
+
+            # # Calculate Stochastic Oscillator
+            # final_data['14-high'] = final_data['High'].rolling(window=14).max()
+            # final_data['14-low'] = final_data['Low'].rolling(window=14).min()
+            # final_data['%K'] = (final_data['Close'] - final_data['14-low']) * 100 / (final_data['14-high'] - final_data['14-low'])
+            # final_data['%D'] = final_data['%K'].rolling(window=3).mean()
+
+            # # Calculate Parabolic SAR (for simplicity, this example uses a fixed acceleration factor)
+            # final_data['PSAR'] = final_data['Close'].shift() + (0.02 * (final_data['High'] - final_data['Low']))
+
+            # # Determine the trend for each day based on the previous day's levels
+            # trends = []
+            # for i in range(1, len(tpo_profiles_df)):
+            #     previous_day = tpo_profiles_df.iloc[i - 1]
+            #     current_day = tpo_profiles_df.iloc[i]
+
+            #     if current_day['Initial Balance High'] > previous_day['VAH']:
+            #         trend = 'Bullish'
+            #     elif current_day['Initial Balance Low'] < previous_day['VAL']:
+            #         trend = 'Bearish'
+            #     else:
+            #         trend = 'Neutral'
+
+            #     trend_entry = {
+            #         'Date': current_day['Date'],
+            #         'Trend': trend,
+            #         'Previous Day VAH': round(previous_day['VAH'], 2),
+            #         'Previous Day VAL': round(previous_day['VAL'], 2),
+            #         'Previous Day POC': round(previous_day['POC'], 2),
+            #     }
+
+            #     trends.append(trend_entry)
+
+            # # Convert the trends list to a DataFrame
+            # trends_df = pd.DataFrame(trends)
+
+            # # Merge trend data into final_data
+            # final_data = pd.merge(final_data, trends_df, on='Date', how='left')
+
+            # # Define the conditions for Initial Balance Range classification
+            # conditions = [
+            #     final_data['Initial Balance Range'] < final_data['Prev_Day_ATR_14_1_Day'] / 3,
+            #     (final_data['Initial Balance Range'] >= final_data['Prev_Day_ATR_14_1_Day'] / 3) & 
+            #     (final_data['Initial Balance Range'] <= final_data['Prev_Day_ATR_14_1_Day']),
+            #     final_data['Initial Balance Range'] > final_data['Prev_Day_ATR_14_1_Day']
+            # ]
+
+            # # Define the corresponding values for each condition
+            # choices = ['Small', 'Medium', 'Large']
+
+            # # Create the IB Range column using np.select()
+            # final_data['IB Range'] = np.select(conditions, choices, default='Unknown')
+
+            # # Round all values in final_data to 2 decimals
+            # final_data = final_data.round(2)
+
+            # # Initialize an empty list to store each day's input text and trend
+            # training_data = []
+
+            # final_data = final_data.sort_values(by='Datetime')
+
+            # # Get the unique dates and sort them
+            # sorted_dates = sorted(set(final_data['Date']))
+            # final_data['2 Day VAH and VAL'] = ''
+            # # final_data['Previous Initial Market Profile Shape'] = ''
+            # # final_data['Previous Refined Market Profile Shape'] = ''
+
+            # # Iterate over the sorted dates by index, starting from the third day to have data for previous two days
+            # for i in range(2, len(sorted_dates)):
+            #     date = sorted_dates[i]
+            #     previous_date = sorted_dates[i - 1]
+            #     two_days_ago = sorted_dates[i - 2]
+
+            #     # Extract data for the current date and previous dates
+            #     current_data = final_data[final_data['Date'] == date]
+            #     previous_data = final_data[final_data['Date'] == previous_date]
+            #     two_days_ago_data = final_data[final_data['Date'] == two_days_ago]
+
+            #     # Calculate the maximum high and minimum low for the previous day
+            #     day_high = previous_data['High'].max()
+            #     day_low = previous_data['Low'].min()
+
+            #     # Initialize an empty list for actions based on previous day's close and VAH/VAL comparisons
+            #     actions = []
+
+            #     if not previous_data.empty:
+            #         last_row = previous_data.iloc[-1]
+
+            #         # Determine close position relative to VAH and VAL
+            #         if last_row['Close'] >= last_row['VAH']:
+            #             actions.append('Previous Day Close Above VAH')
+            #             actions.append('Previous Day Close Bullish')
+            #         elif last_row['Close'] <= last_row['VAL']:
+            #             actions.append('Previous Day Close Below VAL')
+            #             actions.append('Previous Day Close Bearish')
+            #         else:
+            #             actions.append('Previous Day Close Neutral')
+
+            #         # Insider/Outsider neutral positioning based on VAH/VAL ranges
+            #         if last_row['Previous Day VAH'] >= last_row['VAH'] and last_row['Previous Day VAL'] <= last_row['VAL']:
+            #             actions.append('Insider Neutral')
+            #         elif last_row['Previous Day VAH'] <= last_row['VAH'] and last_row['Previous Day VAL'] >= last_row['VAL']:
+            #             actions.append('Outsider Neutral')
+
+            #         # Determine day type based on Initial Balance range and close
+            #         if last_row['IB Range'] == 'Large' and last_row['Close'] <= last_row['Initial Balance High']:
+            #             final_day_type = 'Large Range Normal Day'
+            #         elif last_row['IB Range'] == 'Medium' and day_high >= last_row['Initial Balance High'] and day_low <= last_row['Initial Balance Low']:
+            #             final_day_type = 'Medium Range Neutral Day'
+            #         elif last_row['IB Range'] == 'Medium' and last_row['Close'] >= last_row['Initial Balance High']:
+            #             final_day_type = 'Medium Range +ve Normal Variation Day'
+            #         elif last_row['IB Range'] == 'Medium' and last_row['Close'] <= last_row['Initial Balance Low']:
+            #             final_day_type = 'Medium Range -ve Normal Variation Day'
+            #         elif last_row['IB Range'] == 'Small' and last_row['Close'] >= last_row['Initial Balance High']:
+            #             final_day_type = 'Small Range +ve Trend Variation Day'
+            #         elif last_row['IB Range'] == 'Small' and last_row['Close'] <= last_row['Initial Balance Low']:
+            #             final_day_type = 'Small Range -ve Trend Variation Day'
+            #         elif last_row['IB Range'] == 'Small' and last_row['Close'] <= last_row['Initial Balance High'] and last_row['Close'] >= last_row['Initial Balance Low']:
+            #             final_day_type = 'Small Range Non Trend Variation Day'
+            #         else:
+            #             final_day_type = ''
+
+            #     # Calculate the opening price and difference from the previous close
+            #     opening_price = current_data.iloc[0]['Open']
+            #     previous_close = previous_data.iloc[-1]['Close']
+            #     open_point_diff = round(opening_price - previous_close, 2) if previous_close else None
+            #     open_percent_diff = round((open_point_diff / previous_close) * 100, 2) if previous_close else None
+            #     open_above_below = "above" if open_point_diff > 0 else "below" if open_point_diff < 0 else "no change"
+
+            #     current_row = current_data.iloc[0]
+
+            # #     # Generate the LLM input text
+            # #     input_text = (
+            # #         f"Today’s profile on {date} for {ticker} indicates an {current_row['IB Range']} Range. The market opened at {opening_price}, "
+            # #         f"which is {open_percent_diff}% ({abs(open_point_diff)} points) {open_above_below} the previous day's close. "
+            # #         f"The Initial Balance High is {current_row['Initial Balance High']} and Low is {current_row['Initial Balance Low']}, "
+            # #         f"giving an Initial Balance Range of {current_row['Initial Balance Range']}. "
+            # #         f"Yesterday's VAH was {last_row['VAH']} and VAL was {last_row['VAL']}. "
+            # #         f"Day before yesterday's VAH was {last_row['Previous Day VAH']} and VAL was {last_row['Previous Day VAL']}. "
+            # #         f"Previous day Type : {last_row['Day Type']}\n"
+            # #         f"Previous Adjusted Day Type : {final_day_type}\n"
+            # #         f"Previous Close Type : {last_row['Close Type']}\n"
+            # #         f"Previous 2 Day VAH and VAL : {actions}. "
+            # #         f"Given these indicators, what is the expected market direction for tomorrow?"
+            # #     )
+
+            #     # Generate the LLM input text with added indicators
+            #     input_text = (
+            #         f"Today’s profile on {date} for {ticker} with IB Range Type {current_row['IB Range']} Range. The market opened at {opening_price}, "
+            #         f"Opening_Gap_Percentage is {open_percent_diff}% ( Opening_Gap_Points {abs(open_point_diff)} points) {open_above_below} the previous day's close. "
+            #         f"The Initial Balance High is {current_row['Initial Balance High']} and Initial Balance Low is {current_row['Initial Balance Low']}, "
+            #         f"giving an Initial Balance Range of {current_row['Initial Balance Range']}. "
+            #         f"Yesterday's VAH was {last_row['VAH']} and Yesterday's VAL was {last_row['VAL']}. "
+            #         f"Day before yesterday's VAH was {last_row['Previous Day VAH']} and Day before yesterday's VAL was {last_row['Previous Day VAL']}. "
+            #         f"Previous day Type: {last_row['Day Type']}.\n"
+            #         f"Previous Adjusted Day Type: {final_day_type}.\n"
+            #         f"Previous Close Type: {last_row['Close Type']}.\n"
+            #         f"Previous 2 Day VAH and VAL: {actions}.\n"
+
+            #         # Adding indicators
+            #         f"MA_20_Day is {last_row['MA_20']}. "
+            #         f"RSI is {last_row['RSI']}. "
+            #         f"MACD is {last_row['MACD']} with Signal Line at {last_row['Signal Line']}. "
+            #         f"Bollinger Bands Upper at {last_row['Bollinger_Upper']} and Bollinger Bands Lower at {last_row['Bollinger_Lower']}. "
+            #         f"VWAP is {last_row['VWAP']}. "
+            #         f"Fibonacci Levels: 38.2% at {last_row['Fib_38.2']}, 50% at {last_row['Fib_50']}, 61.8% at {last_row['Fib_61.8']}. "
+            #         f"ATR is {last_row['ATR']}. "
+            #         f"Stochastic Oscillator %K is {last_row['%K']} and %D is {last_row['%D']}. "
+            #         f"Parabolic SAR is at {last_row['PSAR']}. "
+
+            #         f"Given these indicators, what is the expected market direction for today?"
+            #     )
+
+            #     print(input_text)
+
+            #     current_day_close = current_data.iloc[-1]['Close']
+            #     previous_day_high = previous_data['High'].max()
+            #     previous_day_low = previous_data['Low'].max()
+
+            #     result = ''
+            #     if current_day_close >= previous_close:
+            #         result += 'The stock closed above yesterday close \n'
+            #     else:
+            #         result += 'The stock closed below yesterday close \n'
+            #     if current_day_close >= previous_day_high:
+            #         result += 'The stock closed above Previous Day High \n'
+            #     else:
+            #         result += 'The stock closed below Previous Day High \n'
+
+            #     if current_day_close >= previous_day_low:
+            #         result += 'The stock closed above Previous Day Low \n'
+            #     else:
+            #         result += 'The stock closed below Previous Day Low \n'
+
+            #     if current_day_close >= current_row['Initial Balance High']:
+            #         result += 'The stock closed above Initial Balance High \n'
+            #     else:
+            #         result += 'The stock closed below Initial Balance High \n'
+
+            #     if current_day_close >= current_row['Initial Balance Low']:
+            #         result += 'The stock closed above Initial Balance Low \n'
+            #     else:
+            #         result += 'The stock closed below Initial Balance Low \n'
+
+            #     # Get the trend (output) for the current date
+            #     trend = current_data.iloc[-1]['Trend'] if 'Trend' in current_data.columns else None
+
+            #     # Append the input-output pair to the training data list
+            #     training_data.append({
+            #         'Date': date,
+            #         'Input Text': input_text,
+            #         'Trend': trend,
+            #         'Result': result
+            #     })
+
+            # # Convert the training data list to a DataFrame
+            # training_data_df = pd.DataFrame(training_data)
+
+            def get_price_distribution_for_date_updated(data):
+                last_300_candles = data.tail(300)
+                high_300 = last_300_candles['High'].max()
+                low_300 = last_300_candles['Low'].min()
+                return {
+                    'data': data,
+                    'high_300': high_300,
+                    'low_300': low_300
+                }
+
+            distribution = get_price_distribution_for_date_updated(final_data)
+
+            HighValue = distribution['high_300']
+            LowValue = distribution['low_300']
+
+            MinimumTick = 0.01
+            RowsRequired = 80
+
+            MinTickRange = (HighValue - LowValue) / MinimumTick
+            RowTicks = MinTickRange / RowsRequired
+
+            if 1 <= RowTicks <= 100:
+                increment = 5
+            elif 100 <= RowTicks <= 1000:
+                increment = 50
+            elif 1000 <= RowTicks <= 10000:
+                increment = 500
+            elif 10000 <= RowTicks <= 100000:
+                increment = 5000
+            else:
+                increment = 50000
+
+            ticks_per_row = round(RowTicks / increment) * increment
+
+            tick_size = ticks_per_row * MinimumTick
+
+            # Function to calculate ticks and determine adjusted high and low
+            def calculate_ticks(high, low, tick_size):
+                high_floor = math.floor(high / tick_size) * tick_size
+                high_ceil = math.ceil(high / tick_size) * tick_size
+                low_floor = math.floor(low / tick_size) * tick_size
+                low_ceil = math.ceil(low / tick_size) * tick_size
+                adjusted_high = high_ceil
+                adjusted_low = low_floor
+                return {
+                    "adjusted_high": adjusted_high,
+                    "adjusted_low": adjusted_low,
+                }
+
+            # Adjust high and low values in the data
+            distribution['data']['adjusted_high'] = distribution['data'].apply(lambda row: calculate_ticks(row['High'], row['Low'], tick_size)['adjusted_high'], axis=1)
+            distribution['data']['adjusted_low'] = distribution['data'].apply(lambda row: calculate_ticks(row['High'], row['Low'], tick_size)['adjusted_low'], axis=1)
+
+            # Calculate TPO based on adjusted high and low
+            def calculate_tpo(data, tick_size):
+                data['Date'] = data['Datetime'].dt.date
+                grouped = data.groupby('Date')
+                
                 tpo_counts = defaultdict(list)
-                letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'
-                letter_idx = 0
+                letter_counts = defaultdict(lambda: {'count': 0, 'letters': set(),'range_low':[],'range_high':[]})
+                
+                for date, group in grouped:
+                    letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'
+                    letter_idx = 0
+                    
+                    for index, row in group.iterrows():
+                        current_letter = letters[letter_idx % len(letters)]
+                        letter_idx += 1
+                        
+                        # Generate price levels within the adjusted range and round to avoid floating-point precision issues
+                        price_levels = np.arange(row['adjusted_low'], row['adjusted_high'] + tick_size, tick_size)
+                        price_levels = np.round(price_levels, 2)  # Round to two decimal places
+                        
+                        # Filter to include only prices within the specified range
+                        price_levels = price_levels[(price_levels >= row['adjusted_low'] - 0.00001) & 
+                                                    (price_levels <= row['adjusted_high'] + 0.00001)]
+                        
+                        for i in range(len(price_levels)):
+                            if i == len(price_levels) - 1:
+                                continue
+                            else:
+                                price = price_levels[i]
+                                tpo_counts[(date, price)].append(current_letter)
+                                letter_counts[(date, price)]['count'] += 1
+                                letter_counts[(date, price)]['letters'].add(current_letter)
+                                letter_counts[(date, price)]['range_low'].append(price)
+                                letter_counts[(date, price)]['range_high'].append(price_levels[i+1])
+                            
+                return tpo_counts, letter_counts
 
-                for _, row in data.iterrows():
-                    current_letter = letters[letter_idx % len(letters)]
-                    for price in price_levels:
-                        if row['Low'] <= price <= row['High']:
-                            tpo_counts[price].append(current_letter)
-                    letter_idx += 1
+            tpo_counts, letter_counts = calculate_tpo(distribution['data'], tick_size)
 
-                total_tpo = sum(len(counts) for counts in tpo_counts.values())
-                value_area_target = total_tpo * value_area_percent / 100
+            # Create DataFrame with TPO counts and letters
+            ranges = []
 
-                sorted_tpo = sorted(tpo_counts.items(), key=lambda x: len(x[1]), reverse=True)
-                value_area_tpo = 0
-                value_area_high = 0
-                value_area_low = float('inf')
+            for date, group in distribution['data'].groupby('Date'):
+                sorted_prices = sorted([key for key in letter_counts.keys() if key[0] == date], key=lambda x: x[1])
+                
+                for i in range(len(sorted_prices)):
+                    price = sorted_prices[i][1]
+                    filter_tpo = letter_counts[(date, price)]
+                    next_price = filter_tpo['range_high'][0] if filter_tpo['range_high'] else price
 
-                for price, counts in sorted_tpo:
-                    if value_area_tpo + len(counts) <= value_area_target:
-                        value_area_tpo += len(counts)
-                        value_area_high = max(value_area_high, price)
-                        value_area_low = min(value_area_low, price)
+                    ranges.append({
+                        'Date': date,
+                        'Range_Low': price,
+                        'Range_High': next_price,
+                        'Letter_Count': filter_tpo['count'],
+                        'Letters': ''.join(sorted(filter_tpo['letters']))
+                    })
+
+            range_df = pd.DataFrame(ranges)
+
+            # Identify Single Footprint Rows
+            range_df['Single_Footprint'] = range_df['Letter_Count'] == 1
+
+            # Calculate Initial Balance (IB) High, Low, and Range using the first two rows of each day
+            ib_data = distribution['data'].groupby('Date').head(2)
+
+            # Create IB High, Low, and Range based on first two rows
+            ib_high_low = ib_data.groupby('Date').agg(
+                IB_High=('High', 'max'),
+                IB_Low=('Low', 'min')
+            )
+
+            # Assign the IB values to the ib_data DataFrame
+            ib_data = distribution['data'].groupby('Date').first()
+            ib_data['IB_High'] = ib_high_low['IB_High']
+            ib_data['IB_Low'] = ib_high_low['IB_Low']
+            ib_data['IB_Range'] = ib_data['IB_High'] - ib_data['IB_Low']
+
+            # Merge IB data with TPO ranges
+            final_df = pd.merge(range_df, ib_data[['IB_High', 'IB_Low', 'IB_Range']], left_on='Date', right_index=True, how='left')
+
+            # Calculate the POC (Point of Control)
+            poc_list = []
+            for date, group in range_df.groupby('Date'):
+                max_tpo_count = group['Letter_Count'].max()
+                max_tpo_rows = group[group['Letter_Count'] == max_tpo_count]
+                
+                if len(max_tpo_rows) > 1:
+                    middle_index = len(group) // 2
+                    max_tpo_rows['Distance_From_Middle'] = abs(max_tpo_rows.index - middle_index)
+                    closest_row = max_tpo_rows.sort_values(by=['Distance_From_Middle', 'Range_Low']).iloc[0]
+                else:
+                    closest_row = max_tpo_rows.iloc[0]
+                
+                poc = round((closest_row['Range_Low'] + closest_row['Range_High']) / 2, 2)
+                poc_list.append({'Date': date, 'POC': poc})
+
+            poc_df = pd.DataFrame(poc_list)
+
+            # Merge POC data with range data
+            final_df = pd.merge(final_df, poc_df, on='Date', how='left')
+
+            # Decide which boundary to use for VAH and VAL
+            use_low = False
+
+            # Calculate VAH and VAL
+            vah_val_list = []
+
+            for date, group in final_df.groupby('Date'):
+                group = group.sort_values(by='Range_Low').reset_index(drop=True)
+                
+                total_tpos = group['Letter_Count'].sum()
+                value_area_threshold = total_tpos * 0.7
+                
+                poc_row = group.loc[(group['Range_Low'] <= group['POC']) & (group['Range_High'] >= group['POC'])]
+                if poc_row.empty:
+                    continue
+
+                poc_index = poc_row.index[0]
+                included_tpos = group.loc[poc_index, 'Letter_Count']
+                vah_index, val_index = poc_index, poc_index
+
+                while included_tpos < value_area_threshold:
+                    up_index = vah_index + 1 if vah_index + 1 < len(group) else None
+                    down_index = val_index - 1 if val_index - 1 >= 0 else None
+                    
+                    if up_index is not None and down_index is not None:
+                        if group.loc[up_index, 'Letter_Count'] > group.loc[down_index, 'Letter_Count']:
+                            included_tpos += group.loc[up_index, 'Letter_Count']
+                            vah_index = up_index
+                        elif group.loc[up_index, 'Letter_Count'] < group.loc[down_index, 'Letter_Count']:
+                            included_tpos += group.loc[down_index, 'Letter_Count']
+                            val_index = down_index
+                        else:
+                            included_tpos += group.loc[up_index, 'Letter_Count']
+                            included_tpos += group.loc[down_index, 'Letter_Count']
+                            vah_index = up_index
+                            val_index = down_index
+                    elif up_index is not None:
+                        included_tpos += group.loc[up_index, 'Letter_Count']
+                        vah_index = up_index
+                    elif down_index is not None:
+                        included_tpos += group.loc[down_index, 'Letter_Count']
+                        val_index = down_index
                     else:
                         break
 
-                poc = sorted_tpo[0][0]  # Price with highest TPO count
-                vah = value_area_high
-                val = value_area_low
+                if use_low:
+                    vah = group.loc[vah_index, 'Range_Low']
+                    val = group.loc[val_index, 'Range_Low']
+                else:
+                    vah = group.loc[vah_index, 'Range_High']
+                    val = group.loc[val_index, 'Range_High']
 
-                return tpo_counts, poc, vah, val
+                vah_val_list.append({'Date': date, 'VAH': vah, 'VAL': val})
 
-            # Group by date and calculate TPO profile for each day
-            daily_tpo_profiles = []
+            vah_val_df = pd.DataFrame(vah_val_list)
 
-            for date, group in final_data.groupby('Date'):
-                tpo_counts, poc, vah, val = calculate_tpo(group, tick_size, value_area_percent)
+            vah_val_df.rename(columns={'VAH': 'Predicted_VAH', 'VAL': 'Predicted_VAL'}, inplace=True)
 
-                # Calculate Initial Balance Range (IBR)
-                initial_balance_high = group['High'].iloc[:2].max()  # First 2 half-hour periods (1 hour)
-                initial_balance_low = group['Low'].iloc[:2].min()
-                initial_balance_range = initial_balance_high - initial_balance_low
+            # Merge with the original DataFrame to get all columns
+            final_df = pd.merge(final_df, vah_val_df, on='Date', how='left')
+            # final_df = pd.merge(final_df, distribution['data'][['Datetime', 'Open', 'High', 'Low', 'Close', 'Volume', 'adjusted_high', 'adjusted_low']], left_on='Date', right_on=distribution['data']['Datetime'].dt.date, how='left')
 
+            # # Display final DataFrame
+            # print(final_df)
+
+            # Sort the dataframe by Date and Range_Low
+            filtered_final_df = final_df[final_df['Single_Footprint'] == True]
+
+            filtered_final_df['Date'] = pd.to_datetime(filtered_final_df['Date'])
+            filtered_final_df = filtered_final_df.sort_values(by=['Date', 'Range_Low'])
+
+            # Function to group continuous ranges
+            def group_continuous_ranges(df):
+                grouped_rows = []
+                
+                # Iterate through each group by date
+                for date, group in df.groupby('Date'):
+                    group = group.sort_values(by='Range_Low')
+                    ranges = []
+                    start = group.iloc[0]['Range_Low']
+                    end = group.iloc[0]['Range_High']
+
+                    for i in range(1, len(group)):
+                        current_low = group.iloc[i]['Range_Low']
+                        current_high = group.iloc[i]['Range_High']
+
+                        if current_low == end:
+                            end = current_high
+                        else:
+                            ranges.append(f"[{start} - {end}]")
+                            start = current_low
+                            end = current_high
+
+                    ranges.append(f"[{start} - {end}]")
+                    grouped_rows.append([date, ', '.join(ranges)])
+
+                return pd.DataFrame(grouped_rows, columns=['Date', 'Single_Footprint_Ranges'])
+
+            # Apply the grouping function
+            grouped_df = group_continuous_ranges(filtered_final_df)
+
+            # # Display the grouped dataframe
+            # print(grouped_df)
+
+            # Create an empty list to store rows for the new dataframe
+            poc_data_list = []
+
+            # Iterate through each date's group in distribution['data']
+            for date, group in distribution['data'].groupby('Date'):
+                poor_low = False
+                poor_high = False
+                
+                # Convert the current date to datetime format to match the final_df format
+                date = pd.to_datetime(date)
+                # Filter the final_df by the current date
+                filtered_date_df = final_df[final_df['Date'] == date]
+                filtered_grouped_single_fp_df = grouped_df[grouped_df['Date'] == date]
+                
+                # Check if the condition is True for any row in the filtered dataframe
+                if (filtered_date_df[filtered_date_df['Range_Low'] == filtered_date_df['Range_Low'].min()]['Letter_Count'] > 1).any():
+                    poor_low = True
+                if (filtered_date_df[filtered_date_df['Range_High'] == filtered_date_df['Range_High'].max()]['Letter_Count'] > 1).any():
+                    poor_high = True
+                
+                print(filtered_date_df)
+            #     print(filtered_grouped_single_fp_df)
+                
+                # Extract unique values of IB_High and IB_Low for the current date
+                IB_High_unique_values = filtered_date_df['IB_High'].unique() if 'IB_High' in filtered_date_df.columns else []
+                IB_Low_unique_values = filtered_date_df['IB_Low'].unique() if 'IB_Low' in filtered_date_df.columns else []
+                IB_Range_unique_values = filtered_date_df['IB_Range'].unique() if 'IB_Range' in filtered_date_df.columns else []
+                POC_values = filtered_date_df['POC'].unique() if 'POC' in filtered_date_df.columns else []
+                VAH_values = filtered_date_df['Predicted_VAH'].unique() if 'Predicted_VAH' in filtered_date_df.columns else []
+                VAL_values = filtered_date_df['Predicted_VAL'].unique() if 'Predicted_VAL' in filtered_date_df.columns else []
+                
+                Single_Foot_Print_values = filtered_grouped_single_fp_df['Single_Footprint_Ranges'].unique() if 'Single_Footprint_Ranges' in filtered_grouped_single_fp_df.columns else []
+                
+                
+
+                # Iterate over each row in the group
+                for index, row in group.iterrows():
+                    # Append a dictionary for each row with the required fields to the list
+                    poc_data_list.append({
+                        'Datetime': row['Datetime'],
+                        'Date':date,
+                        'Open': row['Open'],
+                        'High': row['High'],
+                        'Low': row['Low'],
+                        'Close': row['Close'],
+                        'Volume': row.get('Volume', None),  # Using .get() to handle the case if 'Volume' is not present in the row
+                        'IB_Low': IB_Low_unique_values[0] if len(IB_Low_unique_values) > 0 else None,  # Assuming to use the first unique value
+                        'IB_High': IB_High_unique_values[0] if len(IB_High_unique_values) > 0 else None,  # Assuming to use the first unique value
+                        'IB_Range': IB_Range_unique_values[0] if len(IB_Range_unique_values) > 0 else None,  # Assuming to use the first unique value
+                        'POC': POC_values[0] if len(POC_values) > 0 else None,  
+                        'VAH': VAH_values[0] if len(VAH_values) > 0 else None,  
+                        'VAL': VAL_values[0] if len(VAL_values) > 0 else None,  
+                        'Single_FootPrint':Single_Foot_Print_values[0] if len(Single_Foot_Print_values) > 0 else None,
+                        'Poor_Low':poor_low,
+                        'Poor_High':poor_high,
+                    })
+
+            # Create a DataFrame from the list of dictionaries
+            final_poc_data = pd.DataFrame(poc_data_list)
+
+            # # Print the new dataframe to verify its contents
+            # print(final_poc_data)
+
+            day_ranges = []
+            day_types = []
+            close_types = []
+
+
+            for date, group in final_poc_data.groupby('Date'):
+                day_type = ''
+                close_type = ''
+                
                 # Calculate day's total range
-                day_range = group['High'].max() - group['Low'].min()
-                range_extension = day_range - initial_balance_range
-
-                # Identify Single Prints
-                single_prints = [round(price, 2) for price, counts in tpo_counts.items() if len(counts) == 1]
-
-                # Identify Poor Highs and Poor Lows
-                high_price = group['High'].max()
-                low_price = group['Low'].min()
-                poor_high = len(tpo_counts[high_price]) > 1
-                poor_low = len(tpo_counts[low_price]) > 1
-
+                day_range = round(group['High'].max() - group['Low'].min(),2)
+                
+                initial_balance_range = round(group['IB_Range'].iloc[1],2)
+                
                 # Classify the day
                 if day_range <= initial_balance_range * 1.15:
                     day_type = 'Normal Day'
@@ -953,140 +2453,157 @@ elif tab == "Chat Interface":
                     day_type = 'Trend Day'
                 else:
                     day_type = 'Neutral Day'
-
-                if last_row['Close'] >= initial_balance_high:
+                
+                last_row = group.iloc[-1]
+                if last_row['Close'] >= last_row['IB_High']:
                     close_type = 'Closed above Initial High'
-                elif last_row['Close'] <= initial_balance_low:
+                elif last_row['Close'] <= last_row['IB_Low']:
                     close_type = 'Closed below Initial Low'
                 else:
                     close_type = 'Closed between Initial High and Low'
+                    
+                day_ranges.append(day_range)
+                day_types.append(day_type)
+                close_types.append(close_type)
+                    
+            # Assign the calculated values back to the dataframe
+            final_poc_data['Day_Range'] = final_poc_data['Date'].map(dict(zip(final_poc_data['Date'].unique(), day_ranges)))
+            final_poc_data['Day_Type'] = final_poc_data['Date'].map(dict(zip(final_poc_data['Date'].unique(), day_types)))
+            final_poc_data['Close_Type'] = final_poc_data['Date'].map(dict(zip(final_poc_data['Date'].unique(), close_types)))
 
+            final_poc_data = final_poc_data.sort_values('Datetime',ascending=True)
 
-                # Store the results in a dictionary
-                tpo_profile = {
-                    'Date': date,
-                    'POC': round(poc, 2),
-                    'VAH': round(vah, 2),
-                    'VAL': round(val, 2),
-                    'Initial Balance High': round(initial_balance_high, 2),
-                    'Initial Balance Low': round(initial_balance_low, 2),
-                    'Initial Balance Range': round(initial_balance_range, 2),
-                    'Day Range': round(day_range, 2),
-                    'Range Extension': round(range_extension, 2),
-                    'Day Type': day_type,
-                    'Single Prints': single_prints,
-                    'Poor High': poor_high,
-                    'Poor Low': poor_low,
-                    'Close Type' : close_type
-                }
-                daily_tpo_profiles.append(tpo_profile)
+            # Download daily data for the ATR calculation
+            daily_data = yf.download(ticker, start=start_date_str, interval="1d").reset_index()
 
-            # Convert the list of dictionaries to a DataFrame
-            tpo_profiles_df = pd.DataFrame(daily_tpo_profiles)
+            # Convert 'Date' column in both dataframes to datetime format
+            final_poc_data['Date'] = pd.to_datetime(final_poc_data['Date'])
+            daily_data['Date'] = pd.to_datetime(daily_data['Date'])
 
-            # Merge TPO profile data into final_data based on the 'Date'
-            final_data = pd.merge(final_data, tpo_profiles_df, on='Date', how='left')
+            # Calculate ATR for 30-minute and daily intervals using TA-Lib
+            atr_period = 14
 
-            # Calculate Moving Average (MA)
-            final_data['MA_20'] = final_data['Close'].rolling(window=20).mean()
+            # ATR for daily data using TA-Lib
+            daily_data['ATR_14_1_day'] = talib.ATR(daily_data['High'], daily_data['Low'], daily_data['Close'], timeperiod=atr_period)
+            daily_data['Prev_Day_ATR_14_1_Day'] = daily_data['ATR_14_1_day'].shift(1)
 
-            # Calculate Relative Strength Index (RSI)
-            delta = final_data['Close'].diff()
-            gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-            loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-            final_data['RSI'] = 100 - (100 / (1 + gain / loss))
+            # Merge ATR from daily data into 30-minute data
+            final_poc_data = pd.merge(final_poc_data, daily_data[['Date', 'ATR_14_1_day', 'Prev_Day_ATR_14_1_Day']], on='Date', how='left')
 
-            # Calculate Moving Average Convergence Divergence (MACD)
-            short_ema = final_data['Close'].ewm(span=12, adjust=False).mean()
-            long_ema = final_data['Close'].ewm(span=26, adjust=False).mean()
-            final_data['MACD'] = short_ema - long_ema
-            final_data['Signal Line'] = final_data['MACD'].ewm(span=9, adjust=False).mean()
+            # Calculate ATR for 30-minute data using TA-Lib
+            final_poc_data['ATR_14_30_mins'] = talib.ATR(final_poc_data['High'], final_poc_data['Low'], final_poc_data['Close'], timeperiod=atr_period)
 
-            # Calculate Bollinger Bands
-            final_data['MA_20'] = final_data['Close'].rolling(window=20).mean()
-            final_data['Bollinger_Upper'] = final_data['MA_20'] + (final_data['Close'].rolling(window=20).std() * 2)
-            final_data['Bollinger_Lower'] = final_data['MA_20'] - (final_data['Close'].rolling(window=20).std() * 2)
+            final_poc_data['ATR'] = final_poc_data['ATR_14_30_mins']
 
-            # Calculate Volume Weighted Average Price (VWAP)
-            final_data['VWAP'] = (final_data['Volume'] * (final_data['High'] + final_data['Low'] + final_data['Close']) / 3).cumsum() / final_data['Volume'].cumsum()
+            # Drop unnecessary columns from earlier calculations
+            final_poc_data = final_poc_data.drop(['H-L', 'H-PC', 'L-PC', 'TR'], axis=1, errors='ignore')
 
-            # Calculate Fibonacci Retracement Levels (use high and low from a specific range if applicable)
-            highest = final_data['High'].max()
-            lowest = final_data['Low'].min()
-            final_data['Fib_38.2'] = highest - (highest - lowest) * 0.382
-            final_data['Fib_50'] = (highest + lowest) / 2
-            final_data['Fib_61.8'] = highest - (highest - lowest) * 0.618
+            # Calculate Moving Average (MA) using TA-Lib
+            final_poc_data['MA_20'] = talib.SMA(final_poc_data['Close'], timeperiod=20)
 
-            # Calculate Average True Range (ATR)
-            high_low = final_data['High'] - final_data['Low']
-            high_close = np.abs(final_data['High'] - final_data['Close'].shift())
-            low_close = np.abs(final_data['Low'] - final_data['Close'].shift())
-            true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-            final_data['ATR'] = true_range.rolling(window=14).mean()
+            # Calculate RSI using TA-Lib with a 14-day period
+            final_poc_data['RSI'] = talib.RSI(final_poc_data['Close'], timeperiod=14)
 
-            # Calculate Stochastic Oscillator
-            final_data['14-high'] = final_data['High'].rolling(window=14).max()
-            final_data['14-low'] = final_data['Low'].rolling(window=14).min()
-            final_data['%K'] = (final_data['Close'] - final_data['14-low']) * 100 / (final_data['14-high'] - final_data['14-low'])
-            final_data['%D'] = final_data['%K'].rolling(window=3).mean()
+            # Calculate Moving Average Convergence Divergence (MACD) using TA-Lib
+            final_poc_data['MACD'], final_poc_data['Signal Line'], _ = talib.MACD(final_poc_data['Close'], fastperiod=12, slowperiod=26, signalperiod=9)
 
-            # Calculate Parabolic SAR (for simplicity, this example uses a fixed acceleration factor)
-            final_data['PSAR'] = final_data['Close'].shift() + (0.02 * (final_data['High'] - final_data['Low']))
+            # Calculate Bollinger Bands using TA-Lib
+            final_poc_data['MA_20_BB'], final_poc_data['Bollinger_Upper'], final_poc_data['Bollinger_Lower'] = talib.BBANDS(
+                final_poc_data['Close'], timeperiod=20, nbdevup=2, nbdevdn=2, matype=0
+            )
 
-            # Determine the trend for each day based on the previous day's levels
-            trends = []
-            for i in range(1, len(tpo_profiles_df)):
-                previous_day = tpo_profiles_df.iloc[i - 1]
-                current_day = tpo_profiles_df.iloc[i]
+            # # Calculate Volume Weighted Average Price (VWAP)
+            # # VWAP calculation not available in TA-Lib. Calculating manually.
+            # typical_price = (final_poc_data['High'] + final_poc_data['Low'] + final_poc_data['Close']) / 3
+            # final_poc_data['VWAP'] = (final_poc_data['Volume'] * typical_price).cumsum() / final_poc_data['Volume'].cumsum()
 
-                if current_day['Initial Balance High'] > previous_day['VAH']:
-                    trend = 'Bullish'
-                elif current_day['Initial Balance Low'] < previous_day['VAL']:
-                    trend = 'Bearish'
-                else:
-                    trend = 'Neutral'
+            # # Set up parameters
+            # band_multipliers = [1, 2, 3]  # Equivalent to Bands Multiplier #1, #2, and #3
+            # source = (final_poc_data['High'] + final_poc_data['Low'] + final_poc_data['Close']) / 3  # Equivalent to 'hlc3'
 
-                trend_entry = {
-                    'Date': current_day['Date'],
-                    'Trend': trend,
-                    'Previous Day VAH': round(previous_day['VAH'], 2),
-                    'Previous Day VAL': round(previous_day['VAL'], 2),
-                    'Previous Day POC': round(previous_day['POC'], 2),
-                }
+            # # Calculate the cumulative VWAP
+            # typical_price = source
+            # vwap = (final_poc_data['Volume'] * typical_price).cumsum() / final_poc_data['Volume'].cumsum()
+            # final_poc_data['VWAP'] = vwap
 
-                trends.append(trend_entry)
+            final_poc_data['Date'] = pd.to_datetime(final_poc_data['Date'])
 
-            # Convert the trends list to a DataFrame
-            trends_df = pd.DataFrame(trends)
+            # Define a function to calculate VWAP for each group
+            def calculate_vwap(df):
+                typical_price = (df['High'] + df['Low'] + df['Close']) / 3
+                vwap = (typical_price * df['Volume']).cumsum() / df['Volume'].cumsum()
+                return vwap
 
-            # Merge trend data into final_data
-            final_data = pd.merge(final_data, trends_df, on='Date', how='left')
+            grouped = final_poc_data.groupby(final_poc_data['Date'].dt.date)
+
+            # Apply the VWAP calculation for each group
+            final_poc_data['VWAP'] = grouped.apply(lambda x: calculate_vwap(x)).reset_index(level=0, drop=True)
+
+            # # Calculate the rolling standard deviation of the typical price for each group
+            # final_poc_data['Typical_Price'] = (final_poc_data['High'] + final_poc_data['Low'] + final_poc_data['Close']) / 3
+            # final_poc_data['Rolling_STD'] = grouped['Typical_Price'].apply(lambda x: x.rolling(window=20).std()).reset_index(level=0, drop=True)
+
+            # # Calculate upper and lower bands based on standard deviation multipliers
+            # band_multipliers = [1, 2, 3]  # Equivalent to Bands Multiplier #1, #2, and #3
+            # for i, multiplier in enumerate(band_multipliers, start=1):
+            #     final_poc_data[f'VWAP_Upper_Band_{i}'] = final_poc_data['VWAP'] + final_poc_data['Rolling_STD'] * multiplier
+            #     final_poc_data[f'VWAP_Lower_Band_{i}'] = final_poc_data['VWAP'] - final_poc_data['Rolling_STD'] * multiplier
+
+            # # Drop unnecessary columns
+            # final_poc_data.drop(['Typical_Price', 'Rolling_STD'], axis=1, inplace=True)
+
+            # Extract the date part to group the data by day
+            final_poc_data['Only_Date'] = final_poc_data['Date'].dt.date
+
+            # Calculate daily high and low values from the 30-minute data
+            daily_high_low = final_poc_data.groupby('Only_Date').agg({'High': 'max', 'Low': 'min'}).reset_index()
+
+            # Add the previous day's high and low to the 30-minute data
+            daily_high_low['Previous_High'] = daily_high_low['High'].shift(1)
+            daily_high_low['Previous_Low'] = daily_high_low['Low'].shift(1)
+
+            # Merge the previous high and low values into the original 30-minute data
+            final_poc_data = final_poc_data.merge(daily_high_low[['Only_Date', 'Previous_High', 'Previous_Low']], 
+                                                left_on='Only_Date', right_on='Only_Date', how='left')
+
+            # Calculate Fibonacci retracement levels for each 30-minute interval based on the previous day's high and low
+            final_poc_data['Fib_38.2'] = final_poc_data['Previous_High'] - (final_poc_data['Previous_High'] - final_poc_data['Previous_Low']) * 0.382
+            final_poc_data['Fib_50'] = (final_poc_data['Previous_High'] + final_poc_data['Previous_Low']) / 2
+            final_poc_data['Fib_61.8'] = final_poc_data['Previous_High'] - (final_poc_data['Previous_High'] - final_poc_data['Previous_Low']) * 0.618
+
+            # Drop unnecessary columns
+            final_poc_data.drop(['Previous_High', 'Previous_Low'], axis=1, inplace=True)
+
+            # Calculate Average True Range (ATR) using TA-Lib (already done above)
+            # final_poc_data['ATR'] is equivalent to 'ATR_14_30_mins'
+
+            # Calculate Stochastic Oscillator using TA-Lib
+            final_poc_data['%K'], final_poc_data['%D'] = talib.STOCH(
+                final_poc_data['High'], final_poc_data['Low'], final_poc_data['Close'],
+                fastk_period=14, slowk_period=3, slowk_matype=0, slowd_period=3, slowd_matype=0
+            )
+
+            # Calculate Parabolic SAR using TA-Lib
+            final_poc_data['PSAR'] = talib.SAR(final_poc_data['High'], final_poc_data['Low'], acceleration=0.02, maximum=0.2)
 
             # Define the conditions for Initial Balance Range classification
             conditions = [
-                final_data['Initial Balance Range'] < final_data['Prev_Day_ATR_14_1_Day'] / 3,
-                (final_data['Initial Balance Range'] >= final_data['Prev_Day_ATR_14_1_Day'] / 3) & 
-                (final_data['Initial Balance Range'] <= final_data['Prev_Day_ATR_14_1_Day']),
-                final_data['Initial Balance Range'] > final_data['Prev_Day_ATR_14_1_Day']
+                final_poc_data['IB_Range'] < final_poc_data['Prev_Day_ATR_14_1_Day'] / 3,
+                (final_poc_data['IB_Range'] >= final_poc_data['Prev_Day_ATR_14_1_Day'] / 3) & 
+                (final_poc_data['IB_Range'] <= final_poc_data['Prev_Day_ATR_14_1_Day']),
+                final_poc_data['IB_Range'] > final_poc_data['Prev_Day_ATR_14_1_Day']
             ]
 
             # Define the corresponding values for each condition
             choices = ['Small', 'Medium', 'Large']
 
             # Create the IB Range column using np.select()
-            final_data['IB Range'] = np.select(conditions, choices, default='Unknown')
+            final_poc_data['IB Range Category'] = np.select(conditions, choices, default='Unknown')
 
-            # Round all values in final_data to 2 decimals
-            final_data = final_data.round(2)
-
-            # Initialize an empty list to store each day's input text and trend
-            training_data = []
-
-            final_data = final_data.sort_values(by='Datetime')
+            trends = []
 
             # Get the unique dates and sort them
-            sorted_dates = sorted(set(final_data['Date']))
-            final_data['2 Day VAH and VAL'] = ''
+            sorted_dates = sorted(set(final_poc_data['Date']))
 
             # Iterate over the sorted dates by index, starting from the third day to have data for previous two days
             for i in range(2, len(sorted_dates)):
@@ -1095,19 +2612,89 @@ elif tab == "Chat Interface":
                 two_days_ago = sorted_dates[i - 2]
 
                 # Extract data for the current date and previous dates
-                current_data = final_data[final_data['Date'] == date]
-                previous_data = final_data[final_data['Date'] == previous_date]
-                two_days_ago_data = final_data[final_data['Date'] == two_days_ago]
+                current_data = final_poc_data[final_poc_data['Date'] == date]
+                previous_data = final_poc_data[final_poc_data['Date'] == previous_date]
+                two_days_ago_data = final_poc_data[final_poc_data['Date'] == two_days_ago]
+                
+                previous_data_last_row = previous_data.iloc[-1]
+                previous_data_vah = previous_data_last_row['VAH']
+                previous_data_val = previous_data_last_row['VAL']
+                previous_data_poc = previous_data_last_row['POC']
+                
+                current_data_first_row = current_data.iloc[0]
+                current_data_ib_high = current_data_first_row['IB_High']
+                current_data_ib_low = current_data_first_row['IB_Low']
+                
+                if current_data_ib_high > previous_data_vah:
+                    trend = 'Bullish'
+                elif current_data_ib_low < previous_data_val:
+                    trend = 'Bearish'
+                else:
+                    trend = 'Neutral'
+                
+                trend_entry = {
+                    'Date': date,
+                    'Trend': trend,
+                    'Previous Day VAH': round(previous_data_vah, 2),
+                    'Previous Day VAL': round(previous_data_val, 2),
+                    'Previous Day POC': round(previous_data_poc, 2),
+                }
+                
+                trends.append(trend_entry)
+                
 
+            # Convert the trends list to a DataFrame
+            trends_df = pd.DataFrame(trends)
+
+            # Merge trend data into final_data
+            final_poc_data = pd.merge(final_poc_data, trends_df, on='Date', how='left')
+
+            # Initialize an empty list to store each day's input text and trend
+            training_data = []
+
+            # st.write(input_date)
+            # st.write(final_poc_data.tail())
+
+            final_poc_data['Date'] = final_poc_data['Date'].dt.date
+
+            # filtered_poc_today_df = final_poc_data[final_poc_data['Date'] == input_date]
+
+            # st.write(filtered_poc_today_df)
+
+            st.write("final_poc_data :")
+            st.write(final_poc_data)
+
+            
+
+            # final_poc_data = final_poc_data[final_poc_data['Datetime'] < pd.to_datetime(input_date)]
+
+            # Get the unique dates and sort them
+            sorted_dates = sorted(set(final_poc_data['Date']))
+            final_poc_data['2 Day VAH and VAL'] = ''
+
+            # Iterate over the sorted dates by index, starting from the third day to have data for previous two days
+            for i in range(2, len(sorted_dates)):
+                date = sorted_dates[i]
+                previous_date = sorted_dates[i - 1]
+                two_days_ago = sorted_dates[i - 2]
+
+                # Extract data for the current date and previous dates
+                current_data = final_poc_data[final_poc_data['Date'] == date]
+                previous_data = final_poc_data[final_poc_data['Date'] == previous_date]
+                two_days_ago_data = final_poc_data[final_poc_data['Date'] == two_days_ago]
+                
                 # Calculate the maximum high and minimum low for the previous day
                 day_high = previous_data['High'].max()
                 day_low = previous_data['Low'].min()
-
+                
                 # Initialize an empty list for actions based on previous day's close and VAH/VAL comparisons
                 actions = []
 
                 if not previous_data.empty:
                     last_row = previous_data.iloc[-1]
+
+                    # st.write("previous_data")
+                    # st.write(previous_data)
 
                     # Determine close position relative to VAH and VAL
                     if last_row['Close'] >= last_row['VAH']:
@@ -1126,19 +2713,19 @@ elif tab == "Chat Interface":
                         actions.append('Outsider Neutral')
 
                     # Determine day type based on Initial Balance range and close
-                    if last_row['IB Range'] == 'Large' and last_row['Close'] <= last_row['Initial Balance High']:
+                    if last_row['IB Range Category'] == 'Large' and last_row['Close'] <= last_row['IB_High']:
                         final_day_type = 'Large Range Normal Day'
-                    elif last_row['IB Range'] == 'Medium' and day_high >= last_row['Initial Balance High'] and day_low <= last_row['Initial Balance Low']:
+                    elif last_row['IB Range Category'] == 'Medium' and day_high >= last_row['IB_High'] and day_low <= last_row['IB_Low']:
                         final_day_type = 'Medium Range Neutral Day'
-                    elif last_row['IB Range'] == 'Medium' and last_row['Close'] >= last_row['Initial Balance High']:
+                    elif last_row['IB Range Category'] == 'Medium' and last_row['Close'] >= last_row['IB_High']:
                         final_day_type = 'Medium Range +ve Normal Variation Day'
-                    elif last_row['IB Range'] == 'Medium' and last_row['Close'] <= last_row['Initial Balance Low']:
+                    elif last_row['IB Range Category'] == 'Medium' and last_row['Close'] <= last_row['IB_Low']:
                         final_day_type = 'Medium Range -ve Normal Variation Day'
-                    elif last_row['IB Range'] == 'Small' and last_row['Close'] >= last_row['Initial Balance High']:
+                    elif last_row['IB Range Category'] == 'Small' and last_row['Close'] >= last_row['IB_High']:
                         final_day_type = 'Small Range +ve Trend Variation Day'
-                    elif last_row['IB Range'] == 'Small' and last_row['Close'] <= last_row['Initial Balance Low']:
+                    elif last_row['IB Range Category'] == 'Small' and last_row['Close'] <= last_row['IB_Low']:
                         final_day_type = 'Small Range -ve Trend Variation Day'
-                    elif last_row['IB Range'] == 'Small' and last_row['Close'] <= last_row['Initial Balance High'] and last_row['Close'] >= last_row['Initial Balance Low']:
+                    elif last_row['IB Range Category'] == 'Small' and last_row['Close'] <= last_row['IB_High'] and last_row['Close'] >= last_row['IB_Low']:
                         final_day_type = 'Small Range Non Trend Variation Day'
                     else:
                         final_day_type = ''
@@ -1152,55 +2739,81 @@ elif tab == "Chat Interface":
 
                 current_row = current_data.iloc[0]
 
-            #     # Generate the LLM input text
-            #     input_text = (
-            #         f"Today’s profile on {date} for {ticker} indicates an {current_row['IB Range']} Range. The market opened at {opening_price}, "
-            #         f"which is {open_percent_diff}% ({abs(open_point_diff)} points) {open_above_below} the previous day's close. "
-            #         f"The Initial Balance High is {current_row['Initial Balance High']} and Low is {current_row['Initial Balance Low']}, "
-            #         f"giving an Initial Balance Range of {current_row['Initial Balance Range']}. "
-            #         f"Yesterday's VAH was {last_row['VAH']} and VAL was {last_row['VAL']}. "
-            #         f"Day before yesterday's VAH was {last_row['Previous Day VAH']} and VAL was {last_row['Previous Day VAL']}. "
-            #         f"Previous day Type : {last_row['Day Type']}\n"
-            #         f"Previous Adjusted Day Type : {final_day_type}\n"
-            #         f"Previous Close Type : {last_row['Close Type']}\n"
-            #         f"Previous 2 Day VAH and VAL : {actions}. "
-            #         f"Given these indicators, what is the expected market direction for tomorrow?"
-            #     )
-
+                current_data_trend = current_data.head(2)
+                # Create the formatted string for MA_20 trend
+                ma_20_trend = " -> ".join(round(previous_data['MA_20'],2).astype(str))
+                ma_20_trend_current = " -> ".join(round(current_data_trend['MA_20'],2).astype(str))
+                rsi_trend = " -> ".join(round(previous_data['RSI'],2).astype(str))
+                rsi_trend_current = " -> ".join(round(current_data_trend['RSI'],2).astype(str))
+                macd_trend = " -> ".join(round(previous_data['MACD'],2).astype(str))
+                macd_trend_current = " -> ".join(round(current_data_trend['MACD'],2).astype(str))
+                macd_signal_trend = " -> ".join(round(previous_data['Signal Line'],2).astype(str))
+                macd_signal_trend_current = " -> ".join(round(current_data_trend['Signal Line'],2).astype(str))
+                bb_upper_trend = " -> ".join(round(previous_data['Bollinger_Upper'],2).astype(str))
+                bb_upper_trend_current = " -> ".join(round(current_data_trend['Bollinger_Upper'],2).astype(str))
+                bb_lower_trend = " -> ".join(round(previous_data['Bollinger_Lower'],2).astype(str))
+                bb_lower_trend_current = " -> ".join(round(current_data_trend['Bollinger_Lower'],2).astype(str))
+                vwap_trend = " -> ".join(round(previous_data['VWAP'],2).astype(str))
+                vwap_trend_current = " -> ".join(round(current_data_trend['VWAP'],2).astype(str))
+                atr_trend = " -> ".join(round(previous_data['ATR'],2).astype(str))
+                atr_trend_current = " -> ".join(round(current_data_trend['ATR'],2).astype(str))
+                # st.write(ma_20_trend)
+                
                 # Generate the LLM input text with added indicators
                 input_text = (
-                    f"Today’s profile on {date} for {ticker} with IB Range Type {current_row['IB Range']} Range. The market opened at {opening_price}, "
+                    f"Today’s profile on {date} for {ticker} with IB Range Type {current_row['IB Range Category']} Range. The market opened at {opening_price}, "
                     f"Opening_Gap_Percentage is {open_percent_diff}% ( Opening_Gap_Points {abs(open_point_diff)} points) {open_above_below} the previous day's close. "
-                    f"The Initial Balance High is {current_row['Initial Balance High']} and Initial Balance Low is {current_row['Initial Balance Low']}, "
-                    f"giving an Initial Balance Range of {current_row['Initial Balance Range']}. "
-                    f"Yesterday's VAH was {last_row['VAH']} and Yesterday's VAL was {last_row['VAL']}. "
-                    f"Day before yesterday's VAH was {last_row['Previous Day VAH']} and Day before yesterday's VAL was {last_row['Previous Day VAL']}. "
-                    f"Previous day Type: {last_row['Day Type']}.\n"
+                    f"The Initial Balance High is {current_row['IB_High']} and Initial Balance Low is {current_row['IB_Low']}, "
+                    f"giving an Initial Balance Range of {round(current_row['IB_Range'],2)}. "
+                    f"Yesterday Single FootPrint Ranges was {last_row['Single_FootPrint']} "
+                    f"Yesterday Poor High : {last_row['Poor_High']} "
+                    f"Yesterday Poor Low : {last_row['Poor_Low']} "
+                    f"Yesterday's Close was {last_row['Close']} "
+                    f"Yesterday's VAH was {last_row['VAH']}, Yesterday's VAL was {last_row['VAL']} and Yesterday's POC was {last_row['POC']}"
+                    f"Day before yesterday's VAH was {last_row['Previous Day VAH']} , Day before yesterday's VAL was {last_row['Previous Day VAL']} and Day before yesterday's POC was {last_row['Previous Day POC']}. "
+                    f"Previous Day High was {day_high} and Previous Day Low was {day_low} \n"
+                    f"Previous day Type: {last_row['Day_Type']}.\n"
                     f"Previous Adjusted Day Type: {final_day_type}.\n"
-                    f"Previous Close Type: {last_row['Close Type']}.\n"
+                    f"Previous Close Type: {last_row['Close_Type']}.\n"
                     f"Previous 2 Day VAH and VAL: {actions}.\n"
 
                     # Adding indicators
-                    f"MA_20_Day is {last_row['MA_20']}. "
-                    f"RSI is {last_row['RSI']}. "
-                    f"MACD is {last_row['MACD']} with Signal Line at {last_row['Signal Line']}. "
-                    f"Bollinger Bands Upper at {last_row['Bollinger_Upper']} and Bollinger Bands Lower at {last_row['Bollinger_Lower']}. "
-                    f"VWAP is {last_row['VWAP']}. "
-                    f"Fibonacci Levels: 38.2% at {last_row['Fib_38.2']}, 50% at {last_row['Fib_50']}, 61.8% at {last_row['Fib_61.8']}. "
-                    f"ATR is {last_row['ATR']}. "
-                    f"Stochastic Oscillator %K is {last_row['%K']} and %D is {last_row['%D']}. "
-                    f"Parabolic SAR is at {last_row['PSAR']}. "
+                    f"MovingAverage_20_Day trend for Previous Day (09:30 - 16:00) to Current Day (09:30 - 10:30): {ma_20_trend} -> {ma_20_trend_current}\n"
+                    # f"MovingAverage_20_Day trend for Current Day (09:30 - 10:30): {ma_20_trend_current}\n"
+                    f"MA_20_Day is {round(current_data_trend.iloc[1]['MA_20'],2)}.\n"
+                    f"RSI_14 trend for Previous Day (09:30 - 16:00) to Current Day (09:30 - 10:30): {rsi_trend} -> {rsi_trend_current} \n"
+                    # f"RSI_14 trend for Current Day (09:30 - 10:30): {rsi_trend_current} \n"
+                    f"RSI is {round(current_data_trend.iloc[1]['RSI'],2)}. \n"
+                    f"MACD_LINE trend for Previous Day (09:30 - 16:00) to Current Day (09:30 - 10:30): {macd_trend} -> {macd_trend_current} \n"
+                    # f"MACD_LINE trend for Current Day (09:30 - 10:30): {macd_trend_current} \n"
+                    f"MACD_Signal trend for Previous Day (09:30 - 16:00) to Current Day (09:30 - 10:30): {macd_signal_trend} -> {macd_signal_trend_current} \n"
+                    # f"MACD_Signal trend for Current Day (09:30 - 10:30): {macd_signal_trend_current} \n"
+                    f"MACD is {round(current_data_trend.iloc[1]['MACD'],2)} with Signal Line at {round(current_data_trend.iloc[1]['Signal Line'],2)}. \n"
+                    f"BB_Upper trend for Previous Day (09:30 - 16:00) to Current Day (09:30 - 10:30): {bb_upper_trend} -> {bb_upper_trend_current} \n"
+                    # f"BB_Upper trend for Current Day (09:30 - 10:30): {bb_upper_trend_current} \n"
+                    f"BB_Lower trend for Previous Day (09:30 - 16:00) to Current Day (09:30 - 10:30): {bb_lower_trend} -> {bb_lower_trend_current} \n"
+                    # f"BB_Lower trend for Current Day (09:30 - 10:30): {bb_lower_trend_current} \n"
+                    f"Bollinger Bands Upper at {round(current_data_trend.iloc[1]['Bollinger_Upper'],2)} and Bollinger Bands Lower at {round(current_data_trend.iloc[1]['Bollinger_Lower'],2)}. "
+                    f"VWAP_14 trend for Previous Day (09:30 - 16:00) to Current Day (09:30 - 10:30): {vwap_trend} -> {vwap_trend_current} \n"
+                    # f"VWAP_14 trend for Current Day (09:30 - 10:30): {vwap_trend_current} \n"
+                    f"VWAP is {round(current_data_trend.iloc[1]['VWAP'],2)}. \n"
+                    f"Fibonacci Levels: 38.2% at {round(last_row['Fib_38.2'],2)}, 50% at {round(last_row['Fib_50'],2)}, 61.8% at {round(last_row['Fib_61.8'],2)}. "
+                    f"ATR_14 trend for Previous Day (09:30 - 16:00) to Current Day (09:30 - 10:30): {vwap_trend} -> {vwap_trend_current} \n"
+                    # f"ATR_14 trend for Current Day (09:30 - 10:30): {vwap_trend_current} \n"
+                    f"ATR is {round(current_data_trend.iloc[1]['ATR'],2)}. "
+                    f"Stochastic Oscillator %K is {round(last_row['%K'],2)} and %D is {round(last_row['%D'],2)}. "
+                    f"Parabolic SAR is at {round(last_row['PSAR'],2)}. "
 
                     f"Given these indicators, what is the expected market direction for today?"
                 )
 
-                print(input_text)
-
+                # print(input_text)
+                
                 current_day_close = current_data.iloc[-1]['Close']
                 previous_day_high = previous_data['High'].max()
-                previous_day_low = previous_data['Low'].max()
+                previous_day_low = previous_data['Low'].min()
 
-                result = ''
+                result = f'The stock closed at {round(current_day_close,2)} \n'
                 if current_day_close >= previous_close:
                     result += 'The stock closed above yesterday close \n'
                 else:
@@ -1215,12 +2828,12 @@ elif tab == "Chat Interface":
                 else:
                     result += 'The stock closed below Previous Day Low \n'
 
-                if current_day_close >= current_row['Initial Balance High']:
+                if current_day_close >= current_row['IB_High']:
                     result += 'The stock closed above Initial Balance High \n'
                 else:
                     result += 'The stock closed below Initial Balance High \n'
 
-                if current_day_close >= current_row['Initial Balance Low']:
+                if current_day_close >= current_row['IB_Low']:
                     result += 'The stock closed above Initial Balance Low \n'
                 else:
                     result += 'The stock closed below Initial Balance Low \n'
@@ -1238,6 +2851,44 @@ elif tab == "Chat Interface":
 
             # Convert the training data list to a DataFrame
             training_data_df = pd.DataFrame(training_data)
+
+            current_training_df = training_data_df[training_data_df['Date'] == input_date]
+            st.write(current_training_df)
+
+            if not current_training_df.empty:
+                input_text = current_training_df.iloc[0]['Input Text']
+                
+                # st.write(current_row)
+                # input_text = (
+                #     f"Today’s profile on {input_date} for {ticker} with IB Range Type {current_row['IB_Range']} Range. The market opened at {opening_price}, "
+                #     f"Opening_Gap_Percentage is {open_percent_diff}% ( Opening_Gap_Points {abs(open_point_diff)} points) {open_above_below} the previous day's close. "
+                #     f"The Initial Balance High is {current_row['Initial Balance High']} and Initial Balance Low is {current_row['Initial Balance Low']}, "
+                #     f"giving an Initial Balance Range of {current_row['Initial Balance Range']}. "
+                #     f"Yesterday's VAH was {last_row['VAH']} and Yesterday's VAL was {last_row['VAL']}. "
+                #     f"Day before yesterday's VAH was {last_row['Previous Day VAH']} and Day before yesterday's VAL was {last_row['Previous Day VAL']}. "
+                #     f"Previous day Type: {last_row['Day Type']}.\n"
+                #     f"Previous Adjusted Day Type: {final_day_type}.\n"
+                #     f"Previous Close Type: {last_row['Close Type']}.\n"
+                #     f"Previous 2 Day VAH and VAL: {actions}.\n"
+
+                #     # Adding indicators
+                #     f"MA_20_Day is {last_row['MA_20']}. "
+                #     f"RSI is {last_row['RSI']}. "
+                #     f"MACD is {last_row['MACD']} with Signal Line at {last_row['Signal Line']}. "
+                #     f"Bollinger Bands Upper at {last_row['Bollinger_Upper']} and Bollinger Bands Lower at {last_row['Bollinger_Lower']}. "
+                #     f"VWAP is {last_row['VWAP']}. "
+                #     f"Fibonacci Levels: 38.2% at {last_row['Fib_38.2']}, 50% at {last_row['Fib_50']}, 61.8% at {last_row['Fib_61.8']}. "
+                #     f"ATR is {last_row['ATR']}. "
+                #     f"Stochastic Oscillator %K is {last_row['%K']} and %D is {last_row['%D']}. "
+                #     f"Parabolic SAR is at {last_row['PSAR']}. "
+
+                #     f"Given these indicators, what is the expected market direction for today?"
+                # )
+
+                st.write(input_text)
+
+            training_data_df = training_data_df[training_data_df['Date'] < pd.to_datetime(input_date)]
+
 
             # Display the final training DataFrame
             st.write(training_data_df.head())
@@ -1410,7 +3061,7 @@ elif tab == "Chat Interface":
             similarity_df = pd.DataFrame(similarity_results)
 
             # Sort by total similarity score and select the top 15 rows
-            top_15_similar = similarity_df.sort_values(by='total_similarity_score', ascending=False).head(15)
+            top_15_similar = similarity_df.sort_values(by='total_similarity_score', ascending=False).head(20)
             st.write(top_15_similar)
 
 
@@ -1426,31 +3077,179 @@ elif tab == "Chat Interface":
             #         reference_info += f"Date: {sim['Date']}\nInput Text: {entry_text}\nTrend: {trend}\n\n"
                     reference_info += f"Date: {sim['Date']}\nInput Text: {entry_text}\Result: {result}\n\n"
 
-            # Build the full prompt for LLM
-            prompt = f"""
-            The following are profiles and trends and results from previous market days. Use these as references to determine the result for the provided input text.
+            # # Build the full prompt for LLM
+            # prompt = f"""
+            # You are an advanced financial data analyst AI model.  Your task is to predict stock movement trends for today by analyzing the provided historical top 15 most similar day patterns. Use the given context and criteria for accurate prediction.
+            # Task:
 
-            Reference Information:
+            # 1. Analyze the provided top 15 most similar day patterns from the past and their movements.
+            # 2. Predict the following outcomes for today:
+            #     Will the stock close above or below yesterday's close?
+            #     Will the stock close above or below the previous day's high?
+            #     Will the stock close above or below the previous day's low?
+            #     Will the stock close above or below the initial balance high?
+            #     Will the stock close above or below the initial balance low?
+
+            # Input Format:
+            # 1. Top 15 Similar Patterns: A dataset containing:
+            #     Dates of the similar days.
+            #     Key metrics for each day: Open, High, Low, Close, Initial Balance Metrics, Value Areas, Day Type Information, Technical Indicators, Market Opening Information and other relevant information
+            #     Performance following these patterns (e.g., next-day close relative to various benchmarks).
+            # 2. Today's Data(from Input Text): Includes Open, High, Low, Close, Initial Balance Metrics, Value Areas, Day Type Information, Technical Indicators, Market Opening Information etc
+
+            # Output Format:
+            # Provide a structured prediction in the following table format:
+
+            # Criteria	Prediction (Above/Below)	Confidence (%)	Supporting Similar Patterns (List Days)
+            # Yesterday's Close			
+            # Previous Day's High			
+            # Previous Day's Low			
+            # Initial Balance High			
+            # Initial Balance Low			
+
+            # Example Prediction:
+            # Using the historical patterns provided, justify your prediction for each criterion. For example:
+
+            # Yesterday's Close: Prediction = "Above" with 85% confidence. Supporting patterns: Jan 5, Feb 10, and Mar 20, where similar upward trends were observed following analogous market conditions.
+
+            # Additional Analysis:
+            # Highlight common trends in the top 15 patterns.
+            # Indicate any deviations in today's metrics from those observed in historical patterns.
+            # Suggest external factors (e.g., news, earnings reports) that could influence predictions differently from historical behavior. Here you need to fetch the recent 2 days news information for {ticker}
+
+            # Constraints:
+            # Ensure that predictions are data-driven and align with insights from the top 15 patterns.
+            # Include confidence scores and supporting evidence for transparency.
+
+            # Top 15 similar trends in the past:
+            # {reference_info}
+
+            # Input Text:
+            # {input_text}
+            
+
+            # Based on the top 15 similar trends and the input text, predict the market result for today with confidence and supporting. 
+            # Provide the result prediction with below :
+            # The stock will close above/below yesterday close 
+            # The stock will close above/below Previous Day High 
+            # The stock will close above/below Previous Day Low 
+            # The stock will close above/below Initial Balance High 
+            # The stock will close above/below Initial Balance Low 
+            # """
+
+            prompt = f"""
+            You are an advanced financial data analyst AI model. Your task is to predict stock movement trends for today by analyzing the provided historical top 20 most similar day patterns. Use the context and criteria provided below for an accurate prediction.
+
+            ### Task:
+            1. Analyze the provided **top 20 most similar day patterns** and their movements. Prioritize **Initial Balance Metrics (IB High, IB Low)** and **Value Area Metrics (VAH, VAL)** in your analysis. These metrics should weigh more heavily in your predictions compared to technical indicators.
+            2. Predict the following outcomes for today:
+            - Will the stock close above or below yesterday's close?
+            - Will the stock close above or below the previous day's high?
+            - Will the stock close above or below the previous day's low?
+            - Will the stock close above or below the initial balance high?
+            - Will the stock close above or below the initial balance low?
+
+            ### Prediction Guidelines:
+            - **Priority Hierarchy**:
+            - **First Priority**: Initial Balance Metrics (IB High, IB Low).
+            - **Second Priority**: Value Areas (VAH, VAL).
+            - **Third Priority**: Technical Indicators (RSI, MACD, Bollinger Bands, etc.).
+            - Use IB and VAH as primary drivers for predictions. Technical indicators should provide supporting evidence but not override the influence of IB and VAH.
+
+            ### Trend Analysis Instructions:
+
+            - **Use MA_20 to identify the broader trend.
+            - **Use RSI to evaluate momentum strength or reversals, with overbought (>70) or oversold (<30) conditions signaling potential changes.
+            - **Use MACD crossovers to confirm trend direction, particularly in conjunction with IB levels.
+            - **Use Bollinger Bands to assess volatility-driven breakouts in alignment with IB metrics.
+            - **Use VWAP for intraday trend confirmation; bullish if above, bearish if below.
+            - **Use ATR to gauge volatility shifts that support trend continuation or reversal.
+
+            ### Logical Validation:
+            - Ensure predictions align logically:
+            1. If the stock is predicted to close **above Yesterday's Close**, it must not be below the **Previous Day's Low**.
+            2. If the stock is predicted to close **below the Previous Day's High**, it must also be below the **Initial Balance High**.
+            3. If the stock is predicted to close **above the Initial Balance Low**, it must also be above the **Previous Day's Low**.
+            - Adjust predictions to resolve logical inconsistencies and explain the reasoning behind adjustments in the output.
+
+            ### Input Format:
+            1. **Top 20 Similar Patterns**:
+            - Dataset containing:
+                - Dates of the similar days.
+                - Key metrics for each day: Open, High, Low, Close, Initial Balance Metrics, Value Areas, Day Type Information, Technical Indicators, Market Opening Information, and other relevant details.
+                - Performance following these patterns (e.g., next-day close relative to various benchmarks).
+            2. **Today's Data (from Input Text)**:
+            - Includes the following metrics: Open, High, Low, Close, Initial Balance Metrics, Value Areas, Day Type Information, Technical Indicators, Market Opening Information, etc.
+
+            ### Output Format:
+            What is the initital Balance High and Initital Balance Low for {input_date}
+            Provide a structured prediction in the following table format, including respective values where applicable. Make sure you provide the correct Values after that are provided in the Input Data for Date:{input_date}:
+
+            | **Criteria**            | **Prediction (Above/Below)** | **Confidence (%)** | **Value** | **Supporting Similar Patterns (List Dates)**    |
+            |--------------------------|-----------------------------|--------------------|-------------------------------------------------------------|
+            | Yesterday's Close        |                             |                    |            |                                                |
+            | Previous Day's High      |                             |                    |            |                                                |
+            | Previous Day's Low       |                             |                    |            |                                                |
+            | Initial Balance High     |                             |                    |            |                                                |
+            | Initial Balance Low      |                             |                    |            |                                                |
+
+            ### Example Prediction:
+            Using the historical patterns provided, justify your prediction for each criterion. For example:
+            - **Yesterday's Close**: Prediction = "Above" with 85% confidence, value = $305. Supporting patterns: Jan 5, Feb 10, and Mar 20, where similar upward trends were observed following analogous market conditions.
+
+            ### Additional Analysis:
+            1. Highlight common trends across the top 20 patterns.
+            2. Indicate any deviations in today's metrics compared to historical patterns.
+            3. Suggest external factors (e.g., recent news, earnings reports) that could influence predictions differently from historical behavior. Fetch the **recent 2 days of news** for the stock ticker `{ticker}` to include in your analysis.
+
+            ### Constraints:
+            - Ensure that predictions are data-driven and align with insights from the top 20 patterns.
+            - Provide confidence scores and supporting evidence for each prediction to maintain transparency.
+            - Validate predictions against logical constraints outlined above and provide corrections where needed.
+
+            ### Input Data:
+            **Top 20 Similar Trends in the Past:**
             {reference_info}
 
-            Input Text:
+            **Today's Profile:**
+            {input_text}
+            """
+
+            prompt = f"""
+            What is the yesterday close , Previous Day High , Previous Day Low, Initital Balance High, Initital Balance Low for {input_date}
+
+            Provide a structured prediction in the following table format, including respective values where applicable. Make sure you provide the correct Values after that are provided in the Input Data for Date:{input_date}:
+
+            | **Criteria**             | **Prediction (Above/Below)** | **Confidence (%)** | **Value**  | **Supporting Similar Patterns (List Dates)**   |
+            |--------------------------|------------------------------|--------------------|------------|------------------------------------------------|
+            | Yesterday's Close        |                              |                    |            |                                                |
+            | Previous Day's High      |                              |                    |            |                                                |
+            | Previous Day's Low       |                              |                    |            |                                                |
+            | Initial Balance High     |                              |                    |            |                                                |
+            | Initial Balance Low      |                              |                    |            |                                                |
+
+            Also based on the Predictions above write the range of the closing price : ** Range of Closing Price **
+            
+            ### Prediction Guidelines
+            - Ensure consistency across criteria (Above/Below) to avoid logical contradictions in directional predictions.
+            - The predicted closing range must align with directional movements and reflect realistic market behavior.
+            - Confidence levels should be validated and based on strong evidence to maintain reliability and trust.
+            **Today's Profile:**
             {input_text}
 
-            Based on the reference information and the input text, predict the market result for today. 
-            Provide the result prediction with below :
-            The stock will close above/below yesterday close 
-            The stock will close above/below Previous Day High 
-            The stock will close above/below Previous Day Low 
-            The stock will close above/below Initial Balance High 
-            The stock will close above/below Initial Balance Low 
+            ### Input Data:
+            **Top 20 Similar Trends in the Past:**
+            {reference_info}
+
             """
+
+            st.write(prompt)
 
     #         # Get trend prediction
     #         if st.button("Get Prediction"):
 
             # Set up OpenAI API Key
-            openai.api_key = 'XXX'
-
+            openai.api_key = "XXX"
             # Function to get trend prediction from OpenAI's language model
             def get_trend_prediction(prompt):
                 response = openai.ChatCompletion.create(
@@ -1525,6 +3324,7 @@ elif tab == "Chat Interface":
     #             st.write(f"**User Input {i}:** {entry['input']}")
     #             st.write(f"**Predicted Trend {i}:** {entry['prediction']}")
 
+        
         # Probability of repeatability based on the types of days
         day_type_summary = final_data['Day Type'].value_counts().reset_index()
         day_type_summary.columns = ['Day Type', 'Number of Days']
@@ -1617,7 +3417,3 @@ elif tab == "Chat Interface":
         st.write(llm_response.choices[0].message['content'])
 
     st.success(f"Monitoring strategy '{selected_strategy}' in real-time.")
-
-
-
-# sk-zoZKWYjBeiDxyd8qGnRid_wBzVOnp6KIwvuJBH8HWsT3BlbkFJTctyWrKzuS30R-3vk7K0dN-o7ewkCsaLOmDB6zZhwA
