@@ -1628,12 +1628,13 @@ elif tab == "Chat Interface":
             formatted_min_timestamp = min_timestamp.strftime('%Y%m%d%H%M%S')
 
             # Generate the new URL with the min timestamp as the end parameter
-            next_url = f"https://www.barchart.com/proxies/timeseries/historical/queryminutes.ashx?symbol=TSLA&interval=30&maxrecords=640&end={formatted_min_timestamp}&volume=contract&order=asc&dividends=false&backadjust=false&daystoexpiration=1&contractroll=combined"
+            next_url = f"https://www.barchart.com/proxies/timeseries/historical/queryminutes.ashx?symbol={ticker}&interval=30&maxrecords=640&end={formatted_min_timestamp}&volume=contract&order=asc&dividends=false&backadjust=false&daystoexpiration=1&contractroll=combined"
 
             # Define the recursive data fetching function
             def fetch_data_until_start_date(start_date='2024-01-01'):
                 all_data = pd.DataFrame()  # Initialize an empty DataFrame to store all data
                 next_url = BASE_URL  # Start with the base URL
+                print(next_url)
 
                 while True:
                     # Fetch data from the API
@@ -1667,7 +1668,7 @@ elif tab == "Chat Interface":
                     else:
                         print(f"Failed to fetch data. Status Code: {response.status_code}")
                         break  # Exit if fetching fails
-
+                st.write(all_data.head())
                 # Filter the data to only include dates after the start date
                 all_data = all_data[all_data['Datetime'] >= pd.to_datetime(start_date)]
 
@@ -1691,14 +1692,203 @@ elif tab == "Chat Interface":
 
             # Sort by 'Datetime' in ascending order to maintain chronological order
             merged_data = merged_data.sort_values(by='Datetime').reset_index(drop=True)
-            merged_data = merged_data[merged_data['Datetime'] < pd.to_datetime(input_date)]
+            # merged_data = merged_data[merged_data['Datetime'] < pd.to_datetime(input_date)]
 
-
+            st.write("Merged Data")
             # Display the first few rows of the combined data
             st.write(merged_data.head())
             st.write(merged_data.tail())
 
-            data = merged_data.copy()
+            # # List of tickers to fetch data for
+            # tickers = ['$SPX', 'DOW', '$NDXT']
+
+            # # # Add a date input widget for selecting the start date
+            # # start_date = st.date_input("Select the Start Date", value=datetime(2024, 1, 1).date())
+
+            # # # Convert Streamlit date input to string format suitable for the function
+            # # start_date_str = start_date.strftime('%Y-%m-%d')
+
+            # # Create dataframes for each ticker
+            # dataframes = {}
+            # for ticker in tickers:
+            #     dataframes[ticker] = fetch_stock_data(ticker, start_date=start_date_str, headers=headers, cookies=cookies)
+            #     st.write(f"Data for {ticker}:")
+            #     st.dataframe(dataframes[ticker])
+
+            import time
+            # # Fetch data for major indices
+            # dji_data = fetch_stock_data('DOW')
+            # time.sleep(5)
+            # nasdaq_data = fetch_stock_data('$NDXT')
+            # time.sleep(5)
+            # s_and_p_500_data = fetch_stock_data('$SPX')
+
+            # # List of tickers to fetch data for
+            # tickers = ['$SPX', 'DOW', '$NDXT']
+
+            # # # Add a date input widget for selecting the start date
+            # # start_date = st.date_input("Select the Start Date", value=datetime(2024, 1, 1).date())
+
+            # # # Convert Streamlit date input to string format suitable for the function
+            # # start_date_str = start_date.strftime('%Y-%m-%d')
+
+            # # Create dataframes for each ticker with a delay between fetches
+            # dataframes = {}
+            # for ticker in tickers:
+            #     dataframes[ticker] = fetch_stock_data(ticker, start_date=start_date_str, headers=headers, cookies=cookies)
+            #     st.write(f"Data for {ticker}:")
+            #     st.dataframe(dataframes[ticker])
+            #     time.sleep(5)
+
+            # List of tickers to fetch data for
+            tickers = ['$SPX', '$DOWI', '$NDXT']
+            
+            # tickers = ['AAPL']
+
+            # # Add a date input widget for selecting the start date
+            # start_date = st.date_input("Select the Start Date", value=datetime(2024, 1, 1).date())
+
+            # # Convert Streamlit date input to string format suitable for the function
+            # start_date_str = start_date.strftime('%Y-%m-%d')
+
+            # Convert Streamlit date input to string format suitable for the function
+            start_date_str = start_date.strftime('%Y-%m-%d')
+
+            # Create dataframes for each ticker
+            dataframes = {}
+            for ind_ticker in tickers:
+                time.sleep(15)
+                st.write(ind_ticker)
+
+                # Base URL and parameters
+                BASE_URL = f"https://www.barchart.com/proxies/timeseries/historical/queryminutes.ashx?symbol={ind_ticker}&interval=30&maxrecords=640&volume=contract&order=asc&dividends=false&backadjust=false&daystoexpiration=1&contractroll=combined"
+                response = requests.get(BASE_URL, headers=headers, cookies=cookies)
+
+                st.write(response.status_code)
+
+                if response.status_code == 200:
+                    try:
+                        # Read the response text into a DataFrame with proper headers
+                        data = StringIO(response.text)
+                        df = pd.read_csv(data, header=None, names=["Datetime", "Unknown", "Open", "High", "Low", "Close", "Volume"])
+                        df = df.drop(columns=["Unknown"])  # Drop any unnecessary columns
+                        df['Datetime'] = pd.to_datetime(df['Datetime'])  # Convert to datetime format
+                    except pd.errors.ParserError:
+                        print("Failed to parse response as CSV.")
+                else:
+                    print(f"Failed to fetch data. Status Code: {response.status_code}")
+
+                min_timestamp = df['Datetime'].min()
+
+                st.write(min_timestamp)
+
+                # Format min_timestamp for the next URL
+                formatted_min_timestamp = min_timestamp.strftime('%Y%m%d%H%M%S')
+
+                # Generate the new URL with the min timestamp as the end parameter
+                next_url = f"https://www.barchart.com/proxies/timeseries/historical/queryminutes.ashx?symbol={ind_ticker}&interval=30&maxrecords=640&end={formatted_min_timestamp}&volume=contract&order=asc&dividends=false&backadjust=false&daystoexpiration=1&contractroll=combined"
+
+                # Run the function to fetch data
+                temp_final_data = fetch_data_until_start_date(start_date=start_date_str)
+
+                # Assuming 'df' is the initial dataset and 'final_data' contains the recursively fetched data
+                complete_data = pd.concat([df, temp_final_data], ignore_index=True)
+
+                # Remove any duplicate rows if necessary, based on 'Datetime' and other columns
+                complete_data = complete_data.drop_duplicates(subset=['Datetime'], keep='first')
+
+                # Sort by 'Datetime' in ascending order to maintain chronological order
+                complete_data = complete_data.sort_values(by='Datetime').reset_index(drop=True)
+                # complete_data = complete_data[complete_data['Datetime'] < pd.to_datetime(input_date)]
+
+                dataframes[ind_ticker] = complete_data
+
+                st.write(complete_data)
+
+                # dataframes[ticker] = fetch_stock_data_barchart(ticker, start_date=start_date_str)
+                # st.write(f"Data for {ticker}:")
+                # # time.sleep(25)
+                # st.dataframe(dataframes[ticker])
+
+            spx_data = dataframes['$SPX']
+            dji_data = dataframes['$DOWI']
+            nasdaq_data = dataframes['$NDXT']
+
+            st.write("First few rows of ticker")
+            st.write(merged_data.head())
+
+            st.write("First few rows of S&P 500 Data:")
+            st.dataframe(spx_data.head())
+
+            st.write("First few rows of Dow Jones Industrial Data:")
+            st.dataframe(dji_data.head())
+
+            st.write("First few rows of NASDAQ Data:")
+            st.dataframe(nasdaq_data.head())
+
+            # # Ensure 'Datetime' column is present and in datetime format
+            # for df in [data, dji_data, nasdaq_data, s_and_p_500_data]:
+            #     if 'Datetime' in df.columns:
+            #         df['Datetime'] = pd.to_datetime(df['Datetime'])
+            #     else:
+            #         st.error(f"The dataframe for {df} is missing the 'Datetime' column.")
+            #         # return
+
+            # Calculate percentage changes in 'Close' prices
+            merged_data['pct_change'] = merged_data['Close'].pct_change()
+            dji_data['DJI_pct_change'] = dji_data['Close'].pct_change()
+            nasdaq_data['NASDAQ_pct_change'] = nasdaq_data['Close'].pct_change()
+            spx_data['S_AND_P_500_pct_change'] = spx_data['Close'].pct_change()
+
+            # Align all dataframes to match by timestamp
+            merged_data = pd.merge(merged_data[['Datetime', 'Open', 'High', 'Low','Close','Volume','pct_change']],
+                                dji_data[['Datetime', 'DJI_pct_change']],
+                                on='Datetime', how='inner')
+
+            merged_data = pd.merge(merged_data,
+                                nasdaq_data[['Datetime', 'NASDAQ_pct_change']],
+                                on='Datetime', how='inner')
+
+            merged_data = pd.merge(merged_data,
+                                spx_data[['Datetime', 'S_AND_P_500_pct_change']],
+                                on='Datetime', how='inner')
+
+            # Drop NaN values resulting from the percentage change calculation
+            merged_data.dropna(inplace=True)
+
+            # Calculate correlations
+            correlation_dji = merged_data['pct_change'].corr(merged_data['DJI_pct_change'])
+            correlation_nasdaq = merged_data['pct_change'].corr(merged_data['NASDAQ_pct_change'])
+            correlation_s_and_p_500 = merged_data['pct_change'].corr(merged_data['S_AND_P_500_pct_change'])
+
+            # Display correlations using Streamlit
+            st.write(f"Correlation between {tickers[0]} and DJI movements: {correlation_dji:.2f}")
+            st.write(f"Correlation between {tickers[0]} and NASDAQ movements: {correlation_nasdaq:.2f}")
+            st.write(f"Correlation between {tickers[0]} and SPX movements: {correlation_s_and_p_500:.2f}")
+
+            st.write(dji_data.head())
+            dji_data = calculate_indicators_and_scores(dji_data)
+            nasdaq_data = calculate_indicators_and_scores(nasdaq_data)
+            spx_data = calculate_indicators_and_scores(spx_data)
+
+            dji_data = dji_data[['Datetime','Open','High','Low','Close','Volume','RSI_Score','%K_Score','Stoch_RSI_Score','CCI_Score','BBP_Score','MA_Score','VWAP_Score','BB_Score','Supertrend_Score','Linear_Regression_Score','Sentiment']]
+            nasdaq_data = nasdaq_data[['Datetime','Open','High','Low','Close','Volume','RSI_Score','%K_Score','Stoch_RSI_Score','CCI_Score','BBP_Score','MA_Score','VWAP_Score','BB_Score','Supertrend_Score','Linear_Regression_Score','Sentiment']]
+            spx_data = spx_data[['Datetime','Open','High','Low','Close','Volume','RSI_Score','%K_Score','Stoch_RSI_Score','CCI_Score','BBP_Score','MA_Score','VWAP_Score','BB_Score','Supertrend_Score','Linear_Regression_Score','Sentiment']]
+
+            # Rename columns in dji_data to add '_dji' suffix except for the 'Datetime' column
+            dji_data = dji_data.rename(columns={col: f"{col}_dji" for col in dji_data.columns if col != 'Datetime'})
+            nasdaq_data = nasdaq_data.rename(columns={col: f"{col}_nasdaq" for col in nasdaq_data.columns if col != 'Datetime'})
+            spx_data = spx_data.rename(columns={col: f"{col}_s_and_p_500" for col in spx_data.columns if col != 'Datetime'})
+            
+            index_data = dji_data.copy()
+            # Merge both dataframes on the "Datetime" column
+            index_data = pd.merge(index_data, nasdaq_data, on='Datetime')
+            index_data = pd.merge(index_data, spx_data, on='Datetime')
+
+
+            final_data = merged_data.copy()
+
+            # st.write(final_data)
 
             # # Parameters for TPO calculation
             # value_area_percent = 70
@@ -2108,6 +2298,8 @@ elif tab == "Chat Interface":
             # # Convert the training data list to a DataFrame
             # training_data_df = pd.DataFrame(training_data)
 
+            st.write(final_data)
+
             def get_price_distribution_for_date_updated(data):
                 last_300_candles = data.tail(300)
                 high_300 = last_300_candles['High'].max()
@@ -2473,6 +2665,7 @@ elif tab == "Chat Interface":
 
             final_poc_data = final_poc_data.sort_values('Datetime',ascending=True)
 
+            st.write(ticker)
             # Download daily data for the ATR calculation
             daily_data = yf.download(ticker, start=start_date_str, interval="1d").reset_index()
 
@@ -2482,6 +2675,8 @@ elif tab == "Chat Interface":
 
             # Calculate ATR for 30-minute and daily intervals using TA-Lib
             atr_period = 14
+
+            st.write(daily_data)
 
             # ATR for daily data using TA-Lib
             daily_data['ATR_14_1_day'] = talib.ATR(daily_data['High'], daily_data['Low'], daily_data['Close'], timeperiod=atr_period)
@@ -2664,8 +2859,18 @@ elif tab == "Chat Interface":
             st.write("final_poc_data :")
             st.write(final_poc_data)
 
+            st.write("index_data")
+            st.write(index_data)
+
+            # Assuming 'Datetime' is the common column in both DataFrames
+            final_poc_data = pd.merge(final_poc_data, index_data, on='Datetime', how='inner')
+
+            st.write("final_poc_data :")
+            st.write(final_poc_data)
+
             
 
+            
             # final_poc_data = final_poc_data[final_poc_data['Datetime'] < pd.to_datetime(input_date)]
 
             # Get the unique dates and sort them
@@ -2758,6 +2963,65 @@ elif tab == "Chat Interface":
                 atr_trend = " -> ".join(round(previous_data['ATR'],2).astype(str))
                 atr_trend_current = " -> ".join(round(current_data_trend['ATR'],2).astype(str))
                 # st.write(ma_20_trend)
+
+                highest_correaltion = 0
+                # Determine the highest correlation and update the suffix dynamically
+                if correlation_dji >= correlation_nasdaq and correlation_dji >= correlation_s_and_p_500:
+                    suffix = '_dji'
+                    highest_correaltion = correlation_dji
+                elif correlation_nasdaq >= correlation_dji and correlation_nasdaq >= correlation_s_and_p_500:
+                    suffix = '_nasdaq'
+                    highest_correaltion = correlation_nasdaq
+                else:
+                    suffix = '_s_and_p_500'
+                    highest_correaltion = correlation_s_and_p_500
+
+                # Update the dynamic strings for trends
+                index_ma_20_trend = " -> ".join(round(previous_data[f'MA_Score{suffix}'], 2).astype(str))
+                index_ma_20_trend_current = " -> ".join(round(current_data_trend[f'MA_Score{suffix}'], 2).astype(str))
+                index_rsi_trend = " -> ".join(round(previous_data[f'RSI_Score{suffix}'], 2).astype(str))
+                index_rsi_trend_current = " -> ".join(round(current_data_trend[f'RSI_Score{suffix}'], 2).astype(str))
+                index_perc_k_trend = " -> ".join(round(previous_data[f'%K_Score{suffix}'], 2).astype(str))
+                index_perc_k_trend_current = " -> ".join(round(current_data_trend[f'%K_Score{suffix}'], 2).astype(str))
+                index_stoch_rsi_trend = " -> ".join(round(previous_data[f'Stoch_RSI_Score{suffix}'], 2).astype(str))
+                index_stoch_rsi_trend_current = " -> ".join(round(current_data_trend[f'Stoch_RSI_Score{suffix}'], 2).astype(str))
+                index_cci_trend = " -> ".join(round(previous_data[f'CCI_Score{suffix}'], 2).astype(str))
+                index_cci_trend_current = " -> ".join(round(current_data_trend[f'CCI_Score{suffix}'], 2).astype(str))
+                index_bbp_trend = " -> ".join(round(previous_data[f'BBP_Score{suffix}'], 2).astype(str))
+                index_bbp_trend_current = " -> ".join(round(current_data_trend[f'BBP_Score{suffix}'], 2).astype(str))
+                index_vwap_trend = " -> ".join(round(previous_data[f'VWAP_Score{suffix}'], 2).astype(str))
+                index_vwap_trend_current = " -> ".join(round(current_data_trend[f'VWAP_Score{suffix}'], 2).astype(str))
+                index_bb_trend = " -> ".join(round(previous_data[f'BB_Score{suffix}'], 2).astype(str))
+                index_bb_trend_current = " -> ".join(round(current_data_trend[f'BB_Score{suffix}'], 2).astype(str))
+                index_st_trend = " -> ".join(round(previous_data[f'Supertrend_Score{suffix}'], 2).astype(str))
+                index_st_trend_current = " -> ".join(round(current_data_trend[f'Supertrend_Score{suffix}'], 2).astype(str))
+                index_reg_trend = " -> ".join(round(previous_data[f'Linear_Regression_Score{suffix}'], 2).astype(str))
+                index_reg_trend_current = " -> ".join(round(current_data_trend[f'Linear_Regression_Score{suffix}'], 2).astype(str))
+                index_sentiment_trend = " -> ".join(round(previous_data[f'Sentiment{suffix}'], 2).astype(str))
+                index_sentiment_trend_current = " -> ".join(round(current_data_trend[f'Sentiment{suffix}'], 2).astype(str))
+
+                # dji_ma_20_trend = " -> ".join(round(previous_data['MA_Score_dji'],2).astype(str))
+                # dji_ma_20_trend_current = " -> ".join(round(current_data_trend['MA_Score_dji'],2).astype(str))
+                # dji_rsi_trend = " -> ".join(round(previous_data['RSI_Score_dji'],2).astype(str))
+                # dji_rsi_trend_current = " -> ".join(round(current_data_trend['RSI_Score_dji'],2).astype(str))
+                # dji_perc_k_trend = " -> ".join(round(previous_data['%K_Score_dji'],2).astype(str))
+                # dji_perc_k_trend_current = " -> ".join(round(current_data_trend['%K_Score_dji'],2).astype(str))
+                # dji_stoch_rsi_trend = " -> ".join(round(previous_data['Stoch_RSI_Score_dji'],2).astype(str))
+                # dji_stoch_rsi_trend_current = " -> ".join(round(current_data_trend['Stoch_RSI_Score_dji'],2).astype(str))
+                # dji_cci_trend = " -> ".join(round(previous_data['CCI_Score_dji'],2).astype(str))
+                # dji_cci_trend_current = " -> ".join(round(current_data_trend['CCI_Score_dji'],2).astype(str))
+                # dji_bbp_trend = " -> ".join(round(previous_data['BBP_Score_dji'],2).astype(str))
+                # dji_bbp_trend_current = " -> ".join(round(current_data_trend['BBP_Score_dji'],2).astype(str))
+                # dji_vwap_trend = " -> ".join(round(previous_data['VWAP_Score_dji'],2).astype(str))
+                # dji_vwap_trend_current = " -> ".join(round(current_data_trend['VWAP_Score_dji'],2).astype(str))
+                # dji_bb_trend = " -> ".join(round(previous_data['BB_Score_dji'],2).astype(str))
+                # dji_bb_trend_current = " -> ".join(round(current_data_trend['BB_Score_dji'],2).astype(str))
+                # dji_st_trend = " -> ".join(round(previous_data['Supertrend_Score_dji'],2).astype(str))
+                # dji_st_trend_current = " -> ".join(round(current_data_trend['Supertrend_Score_dji'],2).astype(str))
+                # dji_reg_trend = " -> ".join(round(previous_data['Linear_Regression_Score_dji'],2).astype(str))
+                # dji_reg_trend_current = " -> ".join(round(current_data_trend['Linear_Regression_Score_dji'],2).astype(str))
+                # dji_sentiment_trend = " -> ".join(round(previous_data['Sentiment_dji'],2).astype(str))
+                # dji_sentiment_trend_current = " -> ".join(round(current_data_trend['Sentiment_dji'],2).astype(str))
                 
                 # Generate the LLM input text with added indicators
                 input_text = (
@@ -2803,6 +3067,22 @@ elif tab == "Chat Interface":
                     f"ATR is {round(current_data_trend.iloc[1]['ATR'],2)}. "
                     f"Stochastic Oscillator %K is {round(last_row['%K'],2)} and %D is {round(last_row['%D'],2)}. "
                     f"Parabolic SAR is at {round(last_row['PSAR'],2)}. "
+
+                    f"Below is the Scores trend with Major Index and {ticker} with correlation of  {highest_correaltion:.2f}"
+                    # st.write(f"Correlation between {ticker} and NASDAQ movements: {correlation_nasdaq:.2f}")
+                    # st.write(f"Correlation between {ticker} and S&P 500 movements: {correlation_s_and_p_500:.2f}")
+                    # Adding indicators
+                    f"Index MA20_Score trend for Previous Day (09:30 - 16:00) to Current Day (09:30 - 10:30): {index_ma_20_trend} -> {index_ma_20_trend_current}\n"
+                    f"Index RSI_Score trend for Previous Day (09:30 - 16:00) to Current Day (09:30 - 10:30): {index_rsi_trend} -> {index_rsi_trend_current}\n"
+                    f"Index %K_Score trend for Previous Day (09:30 - 16:00) to Current Day (09:30 - 10:30): {index_perc_k_trend} -> {index_perc_k_trend_current}\n"
+                    f"Index Stoch_RSI trend for Previous Day (09:30 - 16:00) to Current Day (09:30 - 10:30): {index_stoch_rsi_trend} -> {index_stoch_rsi_trend_current}\n"
+                    f"Index CCI_Score trend for Previous Day (09:30 - 16:00) to Current Day (09:30 - 10:30): {index_cci_trend} -> {index_cci_trend_current}\n"
+                    f"Index BBP_Score trend for Previous Day (09:30 - 16:00) to Current Day (09:30 - 10:30): {index_bbp_trend} -> {index_bbp_trend_current}\n"
+                    f"Index VWAP_Score trend for Previous Day (09:30 - 16:00) to Current Day (09:30 - 10:30): {index_vwap_trend} -> {index_vwap_trend_current}\n"
+                    f"Index BB_Score trend for Previous Day (09:30 - 16:00) to Current Day (09:30 - 10:30): {index_bb_trend} -> {index_bb_trend_current}\n"
+                    f"Index Supertrend_Score trend for Previous Day (09:30 - 16:00) to Current Day (09:30 - 10:30): {index_st_trend} -> {index_st_trend_current}\n"
+                    f"Index Linear_Regression_Score trend for Previous Day (09:30 - 16:00) to Current Day (09:30 - 10:30): {index_reg_trend} -> {index_reg_trend_current}\n"
+                    f"Index Sentiment_Score trend for Previous Day (09:30 - 16:00) to Current Day (09:30 - 10:30): {index_sentiment_trend} -> {index_sentiment_trend_current}\n"
 
                     f"Given these indicators, what is the expected market direction for today?"
                 )
@@ -2851,6 +3131,8 @@ elif tab == "Chat Interface":
 
             # Convert the training data list to a DataFrame
             training_data_df = pd.DataFrame(training_data)
+
+            # st.write(training_data_df)
 
             current_training_df = training_data_df[training_data_df['Date'] == input_date]
             st.write(current_training_df)
@@ -3061,7 +3343,7 @@ elif tab == "Chat Interface":
             similarity_df = pd.DataFrame(similarity_results)
 
             # Sort by total similarity score and select the top 15 rows
-            top_15_similar = similarity_df.sort_values(by='total_similarity_score', ascending=False).head(20)
+            top_15_similar = similarity_df.sort_values(by='total_similarity_score', ascending=False).head(15)
             st.write(top_15_similar)
 
 
@@ -3136,12 +3418,13 @@ elif tab == "Chat Interface":
             # The stock will close above/below Initial Balance High 
             # The stock will close above/below Initial Balance Low 
             # """
+            
 
             prompt = f"""
-            You are an advanced financial data analyst AI model. Your task is to predict stock movement trends for today by analyzing the provided historical top 20 most similar day patterns. Use the context and criteria provided below for an accurate prediction.
+            You are an advanced financial data analyst AI model. Your task is to predict stock movement trends for today by analyzing the provided historical top 15 most similar day patterns. Use the context and criteria provided below for an accurate prediction.
 
             ### Task:
-            1. Analyze the provided **top 20 most similar day patterns** and their movements. Prioritize **Initial Balance Metrics (IB High, IB Low)** and **Value Area Metrics (VAH, VAL)** in your analysis. These metrics should weigh more heavily in your predictions compared to technical indicators.
+            1. Analyze the provided **top 15 most similar day patterns** and their movements. Prioritize **Initial Balance Metrics (IB High, IB Low)** and **Value Area Metrics (VAH, VAL)** in your analysis. These metrics should weigh more heavily in your predictions compared to technical indicators.
             2. Predict the following outcomes for today:
             - Will the stock close above or below yesterday's close?
             - Will the stock close above or below the previous day's high?
@@ -3173,7 +3456,7 @@ elif tab == "Chat Interface":
             - Adjust predictions to resolve logical inconsistencies and explain the reasoning behind adjustments in the output.
 
             ### Input Format:
-            1. **Top 20 Similar Patterns**:
+            1. **Top 15 Similar Patterns**:
             - Dataset containing:
                 - Dates of the similar days.
                 - Key metrics for each day: Open, High, Low, Close, Initial Balance Metrics, Value Areas, Day Type Information, Technical Indicators, Market Opening Information, and other relevant details.
@@ -3198,17 +3481,17 @@ elif tab == "Chat Interface":
             - **Yesterday's Close**: Prediction = "Above" with 85% confidence, value = $305. Supporting patterns: Jan 5, Feb 10, and Mar 20, where similar upward trends were observed following analogous market conditions.
 
             ### Additional Analysis:
-            1. Highlight common trends across the top 20 patterns.
+            1. Highlight common trends across the top 15 patterns.
             2. Indicate any deviations in today's metrics compared to historical patterns.
             3. Suggest external factors (e.g., recent news, earnings reports) that could influence predictions differently from historical behavior. Fetch the **recent 2 days of news** for the stock ticker `{ticker}` to include in your analysis.
 
             ### Constraints:
-            - Ensure that predictions are data-driven and align with insights from the top 20 patterns.
+            - Ensure that predictions are data-driven and align with insights from the top 15 patterns.
             - Provide confidence scores and supporting evidence for each prediction to maintain transparency.
             - Validate predictions against logical constraints outlined above and provide corrections where needed.
 
             ### Input Data:
-            **Top 20 Similar Trends in the Past:**
+            **Top 15 Similar Trends in the Past:**
             {reference_info}
 
             **Today's Profile:**
@@ -3238,7 +3521,7 @@ elif tab == "Chat Interface":
             {input_text}
 
             ### Input Data:
-            **Top 20 Similar Trends in the Past:**
+            **Top 15 Similar Trends in the Past:**
             {reference_info}
 
             """
