@@ -15,7 +15,15 @@ from sentence_transformers import SentenceTransformer, util
 import openai
 import talib
 import math
-
+import torch
+from datetime import datetime, timedelta
+from datetime import date
+import numpy as np
+import plotly.graph_objects as go
+from scipy.signal import find_peaks
+import json
+import ast
+import itertools
 
 # Sidebar for inputs
 st.sidebar.title("Trading Dashboard")
@@ -42,10 +50,1433 @@ if 'history' not in st.session_state:
 # Section 1: Stock and Volume Profile Inputs
 st.title("Real-time Volume Profile with Market Shape Detection")
 
-# Main interface with tab selection
-tab = st.selectbox("Select Tab", ["Chat Interface", "Headers and Cookies"])
+ticker = st.text_input("Enter Stock Ticker", value="AAPL")
 
-if tab == "Headers and Cookies":
+# Main interface with tab selection
+tab = st.selectbox("Select Tab", ["Chat Interface", "Headers and Cookies","Volume Footprint Upload"])
+
+
+
+if tab == "Volume Footprint Upload":
+    # Title of the app
+    st.title("File Upload and Timeframe Selection")
+
+    # File uploader
+    uploaded_file = st.file_uploader("Upload a text file")
+
+    # Dropdown for timeframe selection
+    timeframe_options = ["5 seconds", "5 minutes", "1 day"]
+    timeframe = st.selectbox("Select Timeframe", timeframe_options, index=1)  # Default to "5 minutes"
+
+    # Date and time picker for base timestamp
+    # base_date = st.date_input("Select Base Date", datetime(2024, 6, 14).date())
+    base_date = st.date_input("Select Base Date", date.today())
+    base_time = st.time_input("Select Base Time", datetime.strptime("15:55:00", "%H:%M:%S").time())
+
+    # Combine date and time into a single datetime object
+    base_timestamp = datetime.combine(base_date, base_time)
+
+    # Date picker for subsetting the data
+    # subset_date = st.date_input("Select Subset Date", datetime(2024, 6, 1).date())
+    subset_date = st.date_input("Select Subset Date", date.today())
+
+    marker = st.text_input("Enter Marker", value="~m~98~m~")
+    st_input = st.text_input("Enter st_input", value="st23")
+
+    default_date = datetime.today().date()
+    input_date = st.date_input("Start Date", value=default_date)
+
+    # Fetch stock data in real-time
+    def fetch_stock_data(ticker, start, interval='1m'):
+        stock_data = yf.download(ticker, start=start, interval=interval)
+        return stock_data
+
+    data = fetch_stock_data(ticker, input_date)
+
+    temp_data = data.copy()
+
+    # Ensure the DataFrame index is a DatetimeIndex for VWAP calculations
+    temp_data.reset_index(inplace=True)  # Reset index for column access
+    temp_data.set_index(pd.DatetimeIndex(temp_data["Datetime"]), inplace=True)  # Use 'Datetime' as the index
+
+    # Function to calculate Cumulative Volume Delta (CVD)
+    def calculate_cvd(data):
+        """
+        Calculate the Cumulative Volume Delta (CVD) and additional metrics.
+        """
+        data['delta'] = data['Close'] - data['Open']  # Price delta
+        data['buy_volume'] = data['Volume'] * (data['delta'] > 0).astype(int)
+        data['sell_volume'] = data['Volume'] * (data['delta'] < 0).astype(int)
+        data['cvd'] = (data['buy_volume'] - data['sell_volume']).cumsum()
+        return data
+
+    # Function to identify support and resistance levels
+    def identify_support_resistance(data, start_time, end_time):
+        """
+        Identify support (most selling) and resistance (most buying) levels for a given time range.
+        """
+        time_frame = data.between_time(start_time, end_time).copy()
+        time_frame = calculate_cvd(time_frame)
+        
+        if time_frame.empty:
+            return {}
+
+        # Support: Price level with most selling (most negative CVD)
+        support_idx = time_frame['cvd'].idxmin()
+        support_level = time_frame.loc[support_idx, 'Close']
+        support_time = support_idx
+
+        # Resistance: Price level with most buying (most positive CVD)
+        resistance_idx = time_frame['cvd'].idxmax()
+        resistance_level = time_frame.loc[resistance_idx, 'Close']
+        resistance_time = resistance_idx
+
+        return {
+            "support_level": round(support_level, 2),
+            "support_time": support_time.tz_localize(None).strftime('%Y-%m-%d %H:%M:%S'),
+            "resistance_level": round(resistance_level, 2),
+            "resistance_time": resistance_time.tz_localize(None).strftime('%Y-%m-%d %H:%M:%S'),
+        }
+
+    # Calculate CVD for the 09:30-16:00 timeframe
+    cvd_data = temp_data.between_time("09:30", "16:00").copy()
+    cvd_data = calculate_cvd(cvd_data)
+
+    # Identify support and resistance for the 09:30-10:30 timeframe
+    support_resistance_stats = identify_support_resistance(temp_data, "09:30", "10:30")
+    support_level = support_resistance_stats["support_level"]
+    support_time = support_resistance_stats["support_time"]
+    resistance_level = support_resistance_stats["resistance_level"]
+    resistance_time = support_resistance_stats["resistance_time"]
+
+    # # Adding Buy/Sell signals to the data
+    # cvd_data['signal'] = None
+    # cvd_data['signal_type'] = None
+
+    # # Logic for Buy/Sell signals
+    # cvd_data['signal'] = cvd_data.apply(
+    #     lambda row: row['Close'] if (row['Close'] > resistance_level and row['cvd'] > cvd_data.loc[resistance_time, 'cvd']) else (
+    #         row['Close'] if (row['Close'] < support_level and row['cvd'] < cvd_data.loc[support_time, 'cvd']) else None),
+    #     axis=1
+    # )
+
+    # cvd_data['signal_type'] = cvd_data.apply(
+    #     lambda row: 'Buy' if (row['Close'] > resistance_level and row['cvd'] > cvd_data.loc[resistance_time, 'cvd']) else (
+    #         'Sell' if (row['Close'] < support_level and row['cvd'] < cvd_data.loc[support_time, 'cvd']) else None),
+    #     axis=1
+    # )
+
+    # Identify the first Buy signal
+    first_buy_signal = cvd_data[(cvd_data['Close'] > resistance_level) & 
+                                (cvd_data['cvd'] > cvd_data.loc[resistance_time, 'cvd'])].iloc[:1]
+
+    # Identify the first Sell signal
+    first_sell_signal = cvd_data[(cvd_data['Close'] < support_level) & 
+                                (cvd_data['cvd'] < cvd_data.loc[support_time, 'cvd'])].iloc[:1]
+
+    # Add first Buy and Sell timestamps if available
+    first_buy_time = first_buy_signal.index[0].strftime('%Y-%m-%d %H:%M:%S') if not first_buy_signal.empty else "N/A"
+    first_sell_time = first_sell_signal.index[0].strftime('%Y-%m-%d %H:%M:%S') if not first_sell_signal.empty else "N/A"
+
+    st.write("Buy Time: ", first_buy_time)
+    st.write("Sell Time: ", first_sell_time)
+
+    # Update hovertext to include first Buy/Sell timestamps
+    cvd_data['hovertext'] = (
+        "Time: " + cvd_data.index.strftime('%Y-%m-%d %H:%M:%S') +
+        "<br>Open: " + round(cvd_data['Open'], 2).astype(str) +
+        "<br>High: " + round(cvd_data['High'], 2).astype(str) +
+        "<br>Low: " + round(cvd_data['Low'], 2).astype(str) +
+        "<br>Close: " + round(cvd_data['Close'], 2).astype(str) +
+        "<br>CVD: " + round(cvd_data['cvd'], 2).astype(str) +
+        f"<br>Support Level: {support_level}" +
+        f"<br>Support Time: {support_time}" +
+        f"<br>Resistance Level: {resistance_level}" +
+        f"<br>Resistance Time: {resistance_time}" +
+        f"<br>First Buy Time: {first_buy_time}" +
+        f"<br>First Sell Time: {first_sell_time}"
+    )
+
+    # Create the candlestick chart with CVD
+    fig = go.Figure()
+
+    # Add candlestick trace
+    fig.add_trace(go.Candlestick(
+        x=cvd_data.index,
+        open=cvd_data['Open'],
+        high=cvd_data['High'],
+        low=cvd_data['Low'],
+        close=cvd_data['Close'],
+        name='Candlestick',
+        hovertext=cvd_data['hovertext'],
+        hoverinfo='text'
+    ))
+
+    # Add CVD as a line trace on a secondary y-axis
+    fig.add_trace(go.Scatter(
+        x=cvd_data.index,
+        y=cvd_data['cvd'],
+        mode='lines',
+        name='Cumulative Volume Delta (CVD)',
+        line=dict(color='orange'),
+        yaxis='y2',  # Use secondary y-axis
+    ))
+
+    # Add support line
+    fig.add_shape(
+        type="line",
+        x0=cvd_data.index.min(),
+        x1=cvd_data.index.max(),
+        y0=support_level,
+        y1=support_level,
+        line=dict(color="blue", dash="dot"),
+        name="Support Level",
+    )
+
+    # Add resistance line
+    fig.add_shape(
+        type="line",
+        x0=cvd_data.index.min(),
+        x1=cvd_data.index.max(),
+        y0=resistance_level,
+        y1=resistance_level,
+        line=dict(color="red", dash="dot"),
+        name="Resistance Level",
+    )
+
+    # # # Update layout to include a secondary y-axis for CVD
+    # # fig.update_layout(
+    # #     title="Candlestick Chart with CVD (09:30-16:00) and Support/Resistance (09:30-10:30)",
+    # #     xaxis_title="Time",
+    # #     yaxis_title="Price",
+    # #     yaxis2=dict(
+    # #         title="CVD",
+    # #         overlaying='y',
+    # #         side='right'
+    # #     ),
+    # #     template="plotly_dark",
+    # #     hovermode="x unified"
+    # # )
+
+    # # Adding Buy signals (triangle-up)
+    # fig.add_trace(go.Scatter(
+    #     x=cvd_data[cvd_data['signal_type'] == 'Buy'].index,
+    #     y=cvd_data[cvd_data['signal_type'] == 'Buy']['signal'],
+    #     mode='markers',
+    #     name='Buy Signal',
+    #     marker=dict(symbol='triangle-up', color='green', size=10),
+    #     hoverinfo='text',
+    #     hovertext="Buy Signal"
+    # ))
+
+    # # Adding Sell signals (triangle-down)
+    # fig.add_trace(go.Scatter(
+    #     x=cvd_data[cvd_data['signal_type'] == 'Sell'].index,
+    #     y=cvd_data[cvd_data['signal_type'] == 'Sell']['signal'],
+    #     mode='markers',
+    #     name='Sell Signal',
+    #     marker=dict(symbol='triangle-down', color='red', size=10),
+    #     hoverinfo='text',
+    #     hovertext="Sell Signal"
+    # ))
+
+    # # Update layout to include the signals
+    # fig.update_layout(
+    #     title="Candlestick Chart with CVD and Buy/Sell Signals",
+    #     xaxis_title="Time",
+    #     yaxis_title="Price",
+    #     yaxis2=dict(
+    #         title="CVD",
+    #         overlaying='y',
+    #         side='right'
+    #     ),
+    #     template="plotly_dark",
+    #     hovermode="x unified"
+    # )
+
+    # Add Buy signal (triangle-up) to the chart
+    if not first_buy_signal.empty:
+        fig.add_trace(go.Scatter(
+            x=first_buy_signal.index,
+            y=first_buy_signal['Close'],
+            mode='markers',
+            name='First Buy Signal',
+            marker=dict(symbol='triangle-up', color='green', size=10),
+            hoverinfo='text',
+            hovertext="First Buy Signal"
+        ))
+
+    # Add Sell signal (triangle-down) to the chart
+    if not first_sell_signal.empty:
+        fig.add_trace(go.Scatter(
+            x=first_sell_signal.index,
+            y=first_sell_signal['Close'],
+            mode='markers',
+            name='First Sell Signal',
+            marker=dict(symbol='triangle-down', color='red', size=10),
+            hoverinfo='text',
+            hovertext="First Sell Signal"
+        ))
+
+    
+    # Update layout to include the filtered signals
+    fig.update_layout(
+        title="Candlestick Chart with CVD and First Buy/Sell Signals",
+        xaxis_title="Time",
+        yaxis_title="Price",
+        yaxis2=dict(
+            title="CVD",
+            overlaying='y',
+            side='right'
+        ),
+        template="plotly_dark",
+        hovermode="x unified"
+    )
+
+
+    # Display the chart in Streamlit
+    st.plotly_chart(fig)
+
+    # Submit button
+    if st.button("Submit"):
+        if uploaded_file is not None:   
+            # Read and process the uploaded file
+            file_content = uploaded_file.read().decode("utf-8")
+
+            # # Strip everything after the ~m~98~m~ marker
+            # marker = '~m~98~m~'
+            file_content = file_content.split(marker)[0]
+
+            try:
+                # Load the JSON data from the file content
+                main_data = json.loads(file_content)
+                
+                data_section = main_data['p'][1][st_input]['ns']['d']
+    #             data_section = main_data['p'][1]['st2']['ns']['d']
+                nested_data = json.loads(data_section)
+                footprint_levels = nested_data['graphicsCmds']['create']['footprintLevels']
+                df = pd.DataFrame(footprint_levels[0]['data'])
+                
+                footprints = nested_data['graphicsCmds']['create']['footprints']
+                df1 = pd.DataFrame(footprints[0]['data'])
+                
+                # Display the resulting DataFrame
+                st.write("Footprint Levels DataFrame:")
+                st.dataframe(df)
+                
+                st.write("Footprints DataFrame:")
+                st.dataframe(df1)
+
+                # Define the trading holidays
+                trading_holidays = [
+                    datetime(2024, 1, 1),   # Monday, January 1 - New Year's Day
+                    datetime(2024, 1, 15),  # Monday, January 15 - Martin Luther King Jr. Day
+                    datetime(2024, 2, 19),  # Monday, February 19 - Presidents' Day
+                    datetime(2024, 3, 29),  # Friday, March 29 - Good Friday
+                    datetime(2024, 5, 27),  # Monday, May 27 - Memorial Day
+                    datetime(2024, 6, 19),  # Wednesday, June 19 - Juneteenth National Independence Day
+                    datetime(2024, 7, 4),   # Thursday, July 4 - Independence Day
+                    datetime(2024, 9, 2),   # Monday, September 2 - Labor Day
+                    datetime(2024, 11, 28), # Thursday, November 28 - Thanksgiving Day
+                    datetime(2024, 12, 25), # Wednesday, December 25 - Christmas Day
+                    datetime(2025, 1, 1),   # Wednesday, January 1 - New Year's Day
+                    datetime(2025, 1, 20),  # Monday, January 20 - Martin Luther King Jr. Day
+                    datetime(2025, 2, 17),  # Monday, February 17 - Presidents' Day
+                    datetime(2025, 4, 18),  # Friday, April 18 - Good Friday
+                    datetime(2025, 5, 26),  # Monday, May 26 - Memorial Day
+                    datetime(2025, 6, 19),  # Thursday, June 19 - Juneteenth National Independence Day
+                    datetime(2025, 7, 4),   # Friday, July 4 - Independence Day
+                    datetime(2025, 9, 1),   # Monday, September 1 - Labor Day
+                    datetime(2025, 11, 27), # Thursday, November 27 - Thanksgiving Day
+                    datetime(2025, 12, 25)  # Thursday, December 25 - Christmas Day
+                ]
+
+                # Initialize the base timestamp for index 2245
+                # base_timestamp = datetime.strptime('2024-12-06 15:55:00', '%Y-%m-%d %H:%M:%S')
+                # current_timestamp = base_timestamp
+
+                current_timestamp = base_timestamp
+
+                # Initialize a dictionary to store timestamps for each index
+                # index_to_timestamp = {2245: current_timestamp}
+                index_to_timestamp = {max(df1['index']): current_timestamp}
+
+                # Market hours
+                market_open = timedelta(hours=9, minutes=30)
+                market_close = timedelta(hours=15, minutes=55)
+                special_close = {
+                    datetime(2024, 11, 29).date(): timedelta(hours=12, minutes=55)  # Special close time on 2024-11-29
+                }
+                day_increment = timedelta(days=1)
+                weekend_days = [5, 6]  # Saturday and Sunday
+
+                # Calculate the timestamps backward in 5-minute intervals, excluding weekends and outside market hours
+                # for index in range(2244, -1, -1):
+                for index in range(max(df1['index'])-1, -1, -1):
+                    # Subtract 5 minutes
+                    current_timestamp -= timedelta(minutes=5)
+                    
+                    # Check if current timestamp is before market open
+                    while (current_timestamp.time() < (datetime.min + market_open).time() or
+                        current_timestamp.time() > (datetime.min + special_close.get(current_timestamp.date(), market_close)).time() or
+                        current_timestamp.weekday() in weekend_days or
+                        current_timestamp.date() in [holiday.date() for holiday in trading_holidays]):
+                        # Move to previous trading day if before market open
+                        if current_timestamp.time() < (datetime.min + market_open).time():
+                            current_timestamp = datetime.combine(current_timestamp.date() - day_increment, (datetime.min + special_close.get(current_timestamp.date() - day_increment, market_close)).time())
+                        else:
+                            # Otherwise, just subtract 5 minutes
+                            current_timestamp -= timedelta(minutes=5)
+                        
+                        # Skip weekends and trading holidays
+                        while current_timestamp.weekday() in weekend_days or current_timestamp.date() in [holiday.date() for holiday in trading_holidays]:
+                            current_timestamp -= day_increment
+                            current_timestamp = datetime.combine(current_timestamp.date(), (datetime.min + special_close.get(current_timestamp.date(), market_close)).time())
+                    
+                    # Assign the calculated timestamp to the index
+                    index_to_timestamp[index] = current_timestamp
+
+                # Create a list to hold the time series data
+                time_series_data = []
+
+                # Iterate over df1 and extract levels data
+                for i, row in df1.iterrows():
+                    timestamp = index_to_timestamp.get(row['index'])
+                    
+                    if timestamp:
+                        levels = row['levels']
+                        for level in levels:
+                            time_series_data.append({
+                                'timestamp': timestamp,
+                                'price': level['price'],
+                                'buyVolume': level['buyVolume'],
+                                'sellVolume': level['sellVolume'],
+                                'imbalance': level['imbalance'],
+                                'index': row['index']
+                            })
+
+                # Create the dataframe from the time series data
+                series_df = pd.DataFrame(time_series_data)
+
+                series_df['timestamp'] = pd.to_datetime(series_df['timestamp'])
+                series_df['date'] = series_df['timestamp'].dt.date
+
+                # Subset the data based on the selected subset date
+                subset_df = series_df[series_df['date'] == subset_date]
+
+                filtered_df = subset_df.copy()
+
+                # Sort by timestamp and price ascending
+                filtered_df = filtered_df.sort_values(by=['timestamp', 'price']).reset_index(drop=True)
+
+                # Calculate total volume at each price level
+                filtered_df['totalVolume'] = filtered_df['buyVolume'] + filtered_df['sellVolume']
+
+                # Group by timestamp and identify the Point of Control (POC) for each 5-minute interval
+                def calculate_poc(group):
+                    poc_price = group.loc[group['totalVolume'].idxmax(), 'price']
+                    group['poc'] = poc_price
+                    
+                    # Calculate highest bid stacked imbalance and ask stacked imbalance
+                    group['highest_bid_stacked_imbalance'] = group['buyVolume'].max()
+                    group['highest_ask_stacked_imbalance'] = group['sellVolume'].max()
+                    
+                    # Calculate highest ask imbalance stack price (consider imbalance as 'sell' or 'both')
+                    ask_imbalance_filter = group[(group['imbalance'] == 'sell') | (group['imbalance'] == 'both')]
+                    if not ask_imbalance_filter.empty:
+                        highest_ask_imbalance_stack_price = ask_imbalance_filter.loc[ask_imbalance_filter['sellVolume'].idxmax(), 'price']
+                    else:
+                        highest_ask_imbalance_stack_price = None
+                    group['highest_ask_imbalance_stack_price'] = highest_ask_imbalance_stack_price
+                    
+                    # Calculate highest bid imbalance stack price (consider imbalance as 'buy' or 'both')
+                    bid_imbalance_filter = group[(group['imbalance'] == 'buy') | (group['imbalance'] == 'both')]
+                    if not bid_imbalance_filter.empty:
+                        highest_bid_imbalance_stack_price = bid_imbalance_filter.loc[bid_imbalance_filter['buyVolume'].idxmax(), 'price']
+                    else:
+                        highest_bid_imbalance_stack_price = None
+                    group['highest_bid_imbalance_stack_price'] = highest_bid_imbalance_stack_price
+                    
+                    # Calculate lowest ask imbalance price (consider imbalance as 'sell' or 'both')
+                    if not ask_imbalance_filter.empty:
+                        lowest_ask_imbalance_price = ask_imbalance_filter['price'].min()
+                    else:
+                        lowest_ask_imbalance_price = None
+                    group['lowest_ask_imbalance_price'] = lowest_ask_imbalance_price
+                    
+                    # Calculate highest bid imbalance price (consider imbalance as 'buy' or 'both')
+                    if not bid_imbalance_filter.empty:
+                        highest_bid_imbalance_price = bid_imbalance_filter['price'].max()
+                    else:
+                        highest_bid_imbalance_price = None
+                    group['highest_bid_imbalance_price'] = highest_bid_imbalance_price
+                    
+                    return group
+
+                filtered_df = filtered_df.groupby('timestamp', group_keys=False).apply(calculate_poc)
+
+
+
+                # Calculate delta (buyVolume - sellVolume)
+                filtered_df['delta'] = filtered_df['buyVolume'] - filtered_df['sellVolume']
+
+                # Calculate total ask imbalance count and highest stacked imbalance count
+                def calculate_imbalances(group):
+                    # Total ask imbalance count (where imbalance is 'sell' or 'both')
+                    ask_imbalance_count = ((group['imbalance'] == 'sell') | (group['imbalance'] == 'both')).sum()
+                    group['total_ask_imbalance_count'] = ask_imbalance_count
+
+                    # Highest stacked ask imbalance count (consecutive 'sell' or 'both' imbalance)
+                    max_stacked_ask_imbalance = ((group['imbalance'] == 'sell') | (group['imbalance'] == 'both')).astype(int).groupby(((group['imbalance'] != 'sell') & (group['imbalance'] != 'both')).cumsum()).cumsum().max()
+                    group['highest_stacked_ask_imbalance'] = max_stacked_ask_imbalance
+
+                    # Total bid imbalance count (where imbalance is 'buy' or 'both')
+                    bid_imbalance_count = ((group['imbalance'] == 'buy') | (group['imbalance'] == 'both')).sum()
+                    group['total_bid_imbalance_count'] = bid_imbalance_count
+
+                    # Highest stacked bid imbalance count (consecutive 'buy' or 'both' imbalance)
+                    max_stacked_bid_imbalance = ((group['imbalance'] == 'buy') | (group['imbalance'] == 'both')).astype(int).groupby(((group['imbalance'] != 'buy') & (group['imbalance'] != 'both')).cumsum()).cumsum().max()
+                    group['highest_stacked_bid_imbalance'] = max_stacked_bid_imbalance
+
+                    return group
+
+                filtered_df = filtered_df.groupby('timestamp', group_keys=False).apply(calculate_imbalances)
+
+                # Calculate total delta
+                def calculate_delta(group):
+                    group['candle_delta'] = group['buyVolume'].sum() - group['sellVolume'].sum()
+                    return group
+
+                filtered_df = filtered_df.groupby('timestamp', group_keys=False).apply(calculate_delta)
+
+                filtered_df = filtered_df.sort_values(by=['timestamp', 'price']).reset_index(drop=True)
+
+                def add_support_resistance_by_timestamp(df):
+                    # Initialize lists for final results
+                    support_levels_per_timestamp = []
+                    resistance_levels_per_timestamp = []
+
+                    # Group by timestamp
+                    grouped = df.groupby('timestamp')
+
+                    for timestamp, group in grouped:
+                        support_levels = []
+                        resistance_levels = []
+                        
+                        # Group consecutive rows with the same imbalance
+                        for _, sub_group in group.groupby((group['imbalance'] != group['imbalance'].shift()).cumsum()):
+                            if len(sub_group) >= 3:  # Ensure the sub-group has at least 3 rows
+                                prices = sub_group['price'].tolist()
+                                imbalance_type = sub_group['imbalance'].iloc[0]
+                                
+                                # Identify support and resistance levels based on imbalance type
+                                if all(sub_group['imbalance'].isin(['buy', 'both'])):
+                                    support_levels.append([round(p, 2) for p in prices])
+                                elif all(sub_group['imbalance'].isin(['sell', 'both'])):
+                                    resistance_levels.append([round(p, 2) for p in prices])
+
+                        # Store levels for the current timestamp
+                        support_levels_per_timestamp.append((timestamp, support_levels))
+                        resistance_levels_per_timestamp.append((timestamp, resistance_levels))
+                    
+                    # Create new DataFrame columns
+                    df['support_imbalance'] = df['timestamp'].map(
+                        dict((timestamp, levels) for timestamp, levels in support_levels_per_timestamp)
+                    )
+                    df['resistance_imbalance'] = df['timestamp'].map(
+                        dict((timestamp, levels) for timestamp, levels in resistance_levels_per_timestamp)
+                    )
+
+                    return df
+
+                # Apply the function to the filtered DataFrame
+                filtered_df = add_support_resistance_by_timestamp(filtered_df)
+
+                # Sort by timestamp and price
+                filtered_df = filtered_df.sort_values(by=['timestamp', 'price']).reset_index(drop=True)
+
+                # Group by timestamp and check for unfinished bid and ask auctions
+                def check_auctions(group):
+                    min_price_row = group.loc[group['price'].idxmin()]
+                    max_price_row = group.loc[group['price'].idxmax()]
+                    
+                    buy_auction_status = 'incomplete' if min_price_row['buyVolume'] > 0 and min_price_row['sellVolume'] > 0 else 'complete'
+                    sell_auction_status = 'incomplete' if max_price_row['buyVolume'] > 0 and max_price_row['sellVolume'] > 0 else 'complete'
+                    
+                    group['buy_auction_status'] = buy_auction_status
+                    group['sell_auction_status'] = sell_auction_status
+                    
+                    return group
+
+                # Apply the auction check function to each group
+                filtered_df = filtered_df.groupby('timestamp').apply(check_auctions).reset_index(drop=True)
+
+                
+
+                # Define a function that converts the value to a list if needed
+                def safe_literal_eval(val):
+                    if isinstance(val, str):
+                        try:
+                            return ast.literal_eval(val)
+                        except ValueError:
+                            print(f"Error in evaluating: {val}")
+                            return val  # Optionally handle bad strings gracefully
+                    return val
+
+                # Apply to the columns
+                filtered_df['support_imbalance'] = filtered_df['support_imbalance'].apply(safe_literal_eval)
+                filtered_df['resistance_imbalance'] = filtered_df['resistance_imbalance'].apply(safe_literal_eval)
+
+                # Flatten the nested list and then take the set of unique elements
+                filtered_df['support_imbalance_count'] = filtered_df['support_imbalance'].apply(
+                    lambda x: len(set(itertools.chain.from_iterable(x))) if isinstance(x, list) else 0
+                )
+
+                filtered_df['resistance_imbalance_count'] = filtered_df['resistance_imbalance'].apply(
+                    lambda x: len(set(itertools.chain.from_iterable(x))) if isinstance(x, list) else 0
+                )
+
+                # Initialize active support and resistance levels
+                active_support_levels = [item for sublist in filtered_df.loc[0, 'support_imbalance'] for item in sublist]
+                active_resistance_levels = [item for sublist in filtered_df.loc[0, 'resistance_imbalance'] for item in sublist]
+
+                # Function to update active support and resistance levels
+                def update_active_levels(active_levels, traded_price):
+                    # Remove levels that have been breached
+                    return [level for level in active_levels if level != traded_price]
+
+                # Group by timestamp and update active levels
+                active_levels_df = []
+                for timestamp, group in filtered_df.groupby('timestamp'):
+                    # print(timestamp)
+                    # print(active_support_levels)
+                    for idx, row in group.iterrows():
+                        traded_price = round(row['price'],2)
+                        # print(traded_price)
+                        # Add new support and resistance levels from the current row
+                        new_support_levels = [item for sublist in row['support_imbalance'] for item in sublist]
+                        new_resistance_levels = [item for sublist in row['resistance_imbalance'] for item in sublist]
+                        
+                        # Update active support and resistance levels with new levels
+                        active_support_levels = list(set(active_support_levels + new_support_levels))
+                        active_resistance_levels = list(set(active_resistance_levels + new_resistance_levels))
+                        
+                        # Update support levels
+                        active_support_levels = update_active_levels(active_support_levels, traded_price)
+                        
+                        # Update resistance levels
+                        active_resistance_levels = update_active_levels(active_resistance_levels, traded_price)
+                    
+                    # Sort the active support and resistance levels
+                    active_support_levels = sorted(active_support_levels)
+                    active_resistance_levels = sorted(active_resistance_levels)
+                    
+                    # Append the updated levels to the dataframe
+                    active_levels_df.append({
+                        'timestamp': timestamp,
+                        'active_support_levels': active_support_levels,
+                        'active_resistance_levels': active_resistance_levels
+                    })
+
+                # Create a DataFrame for active levels
+                active_levels_df = pd.DataFrame(active_levels_df)
+
+                temp_df = active_levels_df
+
+                temp_df['active_support_levels'] = temp_df['active_support_levels'].apply(str)
+                temp_df['active_resistance_levels'] = temp_df['active_resistance_levels'].apply(str)
+                temp_df = temp_df.drop_duplicates().reset_index()
+
+                
+                # Convert 'support_imbalance' and 'resistance_imbalance' columns to strings
+                filtered_df['support_imbalance'] = filtered_df['support_imbalance'].apply(str)
+                filtered_df['resistance_imbalance'] = filtered_df['resistance_imbalance'].apply(str)
+
+                # Reset index and filter required columns
+                temp_filter_df = filtered_df[['timestamp','poc','highest_bid_stacked_imbalance','highest_ask_stacked_imbalance','highest_ask_imbalance_stack_price','highest_bid_imbalance_stack_price',
+                                            'lowest_ask_imbalance_price','highest_bid_imbalance_price',
+                                            'total_ask_imbalance_count','highest_stacked_ask_imbalance',
+                                            'total_bid_imbalance_count','highest_stacked_bid_imbalance', 
+                                            # 'active_support_levels','active_resistance_levels',
+                                            'support_imbalance_count','resistance_imbalance_count',
+                                            'support_imbalance', 'resistance_imbalance','candle_delta']].drop_duplicates().reset_index(drop=True)
+
+                # Create consecutive POC flag and count highest consecutive POC
+                temp_filter_df['consecutive_poc_flag'] = temp_filter_df['poc'].eq(temp_filter_df['poc'].shift())
+
+                # Calculate the highest consecutive POC count
+                temp_filter_df['highest_consecutive_poc_count'] = temp_filter_df['poc'].groupby((temp_filter_df['poc'] != temp_filter_df['poc'].shift()).cumsum()).transform('count')
+
+                st.dataframe(temp_filter_df)
+
+                # ticker = 'WMT'
+                temp_filter_df['timestamp'] = pd.to_datetime(temp_filter_df['timestamp'])
+
+                # Downloading NKE data from yfinance in 5-minute intervals (only available for the last 60 days)
+                stock_data = yf.download(ticker, interval='5m', period='5d', progress=False)
+
+                # Resetting the index of downloaded NKE data and renaming columns
+                stock_data.reset_index(inplace=True)
+                stock_data['timestamp'] = pd.to_datetime(stock_data['Datetime']).dt.tz_localize(None)
+
+                # Rounding Open, High, Low, Close, and Adj Close columns to two decimals
+                stock_data[['Open', 'High', 'Low', 'Close', 'Adj Close']] = stock_data[['Open', 'High', 'Low', 'Close', 'Adj Close']].round(2)
+
+                # Adding a new column to indicate the trend as Bullish or Bearish
+                stock_data['Candle_Trend'] = stock_data.apply(lambda row: 'Bullish' if row['Adj Close'] > row['Open'] else 'Bearish', axis=1)
+
+                # Left join the existing dataframe with NKE data
+                merged_df = pd.merge(temp_filter_df, stock_data, how='left', on='timestamp')
+
+                # Adding a new column 'poc_direction'
+                merged_df['poc_direction'] = merged_df.apply(lambda row: 'bullish' if row['Adj Close'] >= row['poc'] else 'bearish', axis=1)
+                merged_df['highest_ask_imbalance_price_direction'] = merged_df.apply(
+                    lambda row: '' if np.isnan(row['highest_ask_imbalance_stack_price']) else 
+                                ('bullish' if row['Adj Close'] >= row['highest_ask_imbalance_stack_price'] else 'bearish'),
+                    axis=1
+                )
+                merged_df['highest_bid_imbalance_price_direction'] = merged_df.apply(
+                    lambda row: '' if np.isnan(row['highest_bid_imbalance_stack_price']) else 
+                                ('bullish' if row['Adj Close'] >= row['highest_bid_imbalance_stack_price'] else 'bearish'),
+                    axis=1
+                )
+
+                merged_df['total_bid_ask_count_direction'] = merged_df.apply(
+                    lambda row: 'bearish' if row['total_ask_imbalance_count'] > row['total_bid_imbalance_count'] else 
+                                ('neutral' if row['total_ask_imbalance_count'] == row['total_bid_imbalance_count'] else 'bullish'),
+                    axis=1
+                )
+
+                merged_df['imbalance_support_resistance_direction'] = merged_df.apply(
+                    lambda row: 'bearish' if row['resistance_imbalance_count'] > row['support_imbalance_count'] else 
+                                ('neutral' if row['resistance_imbalance_count'] == row['support_imbalance_count'] else 'bullish'),
+                    axis=1
+                )
+
+                # Add 'selling_activity' column
+                merged_df['selling_activity'] = merged_df.apply(
+                    lambda row: 'selling absorption' if row['Adj Close'] > row['lowest_ask_imbalance_price']
+                                else ('selling initiation' if row['Adj Close'] <= row['lowest_ask_imbalance_price'] else 'neutral'),
+                    axis=1
+                )
+
+                # Add 'buying_activity' column
+                merged_df['buying_activity'] = merged_df.apply(
+                    lambda row: 'buying absorption' if row['Adj Close'] < row['highest_bid_imbalance_price']
+                                else ('buying initiation' if row['Adj Close'] >= row['highest_bid_imbalance_price'] else 'neutral'),
+                    axis=1
+                )
+
+                # Adding a new column called 'activity_type'
+                def determine_activity_type(row):
+                    if row['Candle_Trend'] == 'Bullish' and row['candle_delta'] < 0:
+                        return 'absorption'
+                    elif row['Candle_Trend'] == 'Bearish' and row['candle_delta'] > 0:
+                        return 'absorption'
+                    else:
+                        return 'neutral'
+
+                merged_df['candle_delta_divergence_type'] = merged_df.apply(determine_activity_type, axis=1)
+
+                st.dataframe(merged_df[['timestamp','poc','Adj Close','poc_direction','highest_ask_imbalance_price_direction','highest_bid_imbalance_price_direction','total_bid_ask_count_direction','imbalance_support_resistance_direction','buying_activity','selling_activity','candle_delta_divergence_type','Candle_Trend','candle_delta','support_imbalance_count','resistance_imbalance_count','highest_ask_imbalance_stack_price','highest_bid_imbalance_stack_price']])
+
+                # st.dataframe(merged_df)
+
+                st.write("Time Series DataFrame (last 20 entries):")
+                st.dataframe(series_df.tail(20))
+
+                st.write(f"Subset DataFrame (entries on {subset_date}):")
+                st.dataframe(subset_df)
+
+                # Group by timestamp and sum the buyVolume and sellVolume
+                grouped_df = subset_df.groupby('timestamp').agg({
+                    'buyVolume': 'sum',
+                    'sellVolume': 'sum',
+                    'price': ['min', 'max']
+                }).reset_index()
+
+                # Rename columns for clarity
+                grouped_df.columns = ['timestamp', 'total_buy_volume', 'total_sell_volume', 'min_price', 'max_price']
+
+                # Sort values by timestamp
+                grouped_df = grouped_df.sort_values(by='timestamp', ascending=True)
+
+                # Calculate VWAP
+                def calculate_vwap(df):
+                    df['cum_volume'] = df['total_buy_volume'] + df['total_sell_volume']
+                    df['cum_vwap'] = (df['min_price'] * df['total_buy_volume'] + df['max_price'] * df['total_sell_volume']).cumsum() / df['cum_volume'].cumsum()
+                    return df['cum_vwap']
+
+                # Calculate Support and Resistance Levels
+                def calc_support_resistance(df, window_size=5):
+                    support_levels = []
+                    resistance_levels = []
+
+                    for i in range(len(df)):
+                        if i < window_size:
+                            support_levels.append(np.nan)
+                            resistance_levels.append(np.nan)
+                            continue
+
+                        window = df.iloc[i-window_size:i]
+
+                        # Identify support and resistance based on volume peaks and price reversals
+                        buy_peak = window.loc[window['total_buy_volume'].idxmax()]
+                        sell_peak = window.loc[window['total_sell_volume'].idxmax()]
+
+                        support = buy_peak['min_price'] if buy_peak['min_price'] < df['min_price'].iloc[i] else np.nan
+                        resistance = sell_peak['max_price'] if sell_peak['max_price'] > df['max_price'].iloc[i] else np.nan
+
+                        support_levels.append(support)
+                        resistance_levels.append(resistance)
+
+                    return support_levels, resistance_levels
+
+                # Calculate VWAP
+                grouped_df['VWAP'] = calculate_vwap(grouped_df)
+
+                # Calculate support and resistance levels
+                grouped_df['Support'], grouped_df['Resistance'] = calc_support_resistance(grouped_df)
+
+                # Plotting with Plotly
+                fig = go.Figure()
+
+                # Add price line
+                fig.add_trace(go.Scatter(x=grouped_df['timestamp'], y=(grouped_df['min_price'] + grouped_df['max_price'])/2, mode='lines', name='Price'))
+
+                # Add VWAP line
+                fig.add_trace(go.Scatter(x=grouped_df['timestamp'], y=grouped_df['VWAP'], mode='lines', name='VWAP', line=dict(dash='dash')))
+
+                # Add support levels
+                fig.add_trace(go.Scatter(x=grouped_df['timestamp'], y=grouped_df['Support'], mode='markers', name='Support',
+                                        marker=dict(color='green', size=5, symbol='triangle-up')))
+
+                # Add resistance levels
+                fig.add_trace(go.Scatter(x=grouped_df['timestamp'], y=grouped_df['Resistance'], mode='markers', name='Resistance',
+                                        marker=dict(color='red', size=5, symbol='triangle-down')))
+
+                # Add buy imbalance markers
+                buy_imbalance = subset_df[subset_df['imbalance'] == 'buy']
+                fig.add_trace(go.Scatter(x=buy_imbalance['timestamp'], y=buy_imbalance['price'], mode='markers', name='Buy Imbalance',
+                                        marker=dict(color='blue', size=5, symbol='circle')))
+
+                # Add sell imbalance markers
+                sell_imbalance = subset_df[subset_df['imbalance'] == 'sell']
+                fig.add_trace(go.Scatter(x=sell_imbalance['timestamp'], y=sell_imbalance['price'], mode='markers', name='Sell Imbalance',
+                                        marker=dict(color='orange', size=5, symbol='circle')))
+
+                # Update layout
+                fig.update_layout(
+                    title='Price with Support and Resistance Levels based on Volume and Imbalance',
+                    xaxis_title='Time',
+                    yaxis_title='Price',
+                    xaxis=dict(
+                        tickformat='%H:%M\n%b %d',
+                        tickmode='linear',
+                        dtick=300000  # 5 minutes in milliseconds
+                    ),
+                    template='plotly_dark'
+                )
+
+                # Show the plot
+                st.plotly_chart(fig)
+
+                # Additional chart for buy and sell volumes at each price point
+                # Sum up the buy and sell volumes at each price point
+                volume_df = subset_df.groupby(['timestamp', 'price']).agg({
+                    'buyVolume': 'sum',
+                    'sellVolume': 'sum'
+                }).reset_index()
+
+                # Calculate the sum of buy and sell volumes at each timestamp
+                volume_sum_df = subset_df.groupby('timestamp').agg({
+                    'buyVolume': 'sum',
+                    'sellVolume': 'sum'
+                }).reset_index()
+
+                # Create the figure
+                fig2 = go.Figure()
+
+                # Add the price line
+                fig2.add_trace(go.Scatter(x=volume_df['timestamp'], y=volume_df['price'], mode='lines', name='Price', line=dict(color='blue')))
+
+                # Add buy volumes as green markers
+                fig2.add_trace(go.Scatter(x=volume_df['timestamp'], y=volume_df['price'], mode='markers', name='Buy Volume',
+                                        marker=dict(color='green', size=volume_df['buyVolume'] / 1000, symbol='circle'), opacity=0.6))
+
+                # Add sell volumes as red markers
+                fig2.add_trace(go.Scatter(x=volume_df['timestamp'], y=volume_df['price'], mode='markers', name='Sell Volume',
+                                        marker=dict(color='red', size=volume_df['sellVolume'] / 1000, symbol='circle'), opacity=0.6))
+
+                # Add secondary y-axis for volume sums
+                fig2.add_trace(go.Bar(x=volume_sum_df['timestamp'], y=volume_sum_df['buyVolume'], name='Total Buy Volume',
+                                    marker=dict(color='green'), yaxis='y2'))
+                fig2.add_trace(go.Bar(x=volume_sum_df['timestamp'], y=volume_sum_df['sellVolume'], name='Total Sell Volume',
+                                    marker=dict(color='red'), yaxis='y2'))
+
+                # Update layout for secondary y-axis
+                fig2.update_layout(
+                    title='Buy and Sell Volumes at Each Price Point',
+                    xaxis_title='Time',
+                    yaxis_title='Price',
+                    yaxis2=dict(title='Volume', overlaying='y', side='right'),
+                    template='plotly_dark',
+                    barmode='stack',
+                    bargap=0.2
+                )
+
+                # Show the plot
+                st.plotly_chart(fig2)
+
+                # Third chart: Candlestick with highlighted candles
+
+                # Sum up the buy and sell volumes at each price point
+                volume_df = subset_df.groupby(['timestamp', 'price']).agg({
+                    'buyVolume': 'sum',
+                    'sellVolume': 'sum'
+                }).reset_index()
+
+                # Calculate the sum of buy and sell volumes at each timestamp
+                volume_sum_df = subset_df.groupby('timestamp').agg({
+                    'buyVolume': 'sum',
+                    'sellVolume': 'sum'
+                }).reset_index()
+
+                temp_volume_df = volume_df
+                temp_volume_df['timestamp'] = pd.to_datetime(temp_volume_df['timestamp'])
+
+                # Group by timestamp and calculate the min and max price for each timestamp
+                grouped_prices = temp_volume_df.groupby('timestamp').agg(
+                    maxprice=('price', 'max'),
+                    minprice=('price', 'min')
+                ).reset_index()
+
+                # Merge the grouped prices back into the original dataframe
+                temp_volume_df = temp_volume_df.merge(grouped_prices, on='timestamp', how='left')
+
+                # Function to calculate volumes at min and max prices for each timestamp
+                def calculate_volumes(group):
+                    min_price = group['minprice'].iloc[0]
+                    max_price = group['maxprice'].iloc[0]
+
+                    min_price_data = group[group['price'] == min_price]
+                    max_price_data = group[group['price'] == max_price]
+
+                    min_buy_volume = min_price_data['buyVolume'].sum()
+                    min_sell_volume = min_price_data['sellVolume'].sum()
+                    max_buy_volume = max_price_data['buyVolume'].sum()
+                    max_sell_volume = max_price_data['sellVolume'].sum()
+
+                    group['minPricebuyVolume'] = min_buy_volume
+                    group['minPricesellVolume'] = min_sell_volume
+                    group['maxPricebuyVolume'] = max_buy_volume
+                    group['maxPricesellVolume'] = max_sell_volume
+
+                    return group
+
+                # Apply the function to calculate volumes for each group
+                temp_volume_df = temp_volume_df.groupby('timestamp').apply(calculate_volumes).reset_index(drop=True)
+
+                # Calculate the min and max price for each timestamp and the total buy/sell volume
+                candlestick_data = temp_volume_df.groupby('timestamp').agg({
+                    'price': ['min', 'max'],
+                    'buyVolume': 'sum',
+                    'sellVolume': 'sum',
+                    'minPricebuyVolume': 'first',
+                    'minPricesellVolume': 'first',
+                    'maxPricebuyVolume': 'first',
+                    'maxPricesellVolume': 'first'
+                })
+
+                candlestick_data.columns = [
+                    'low', 'high', 'totalBuyVolume', 'totalSellVolume',
+                    'MinPricebuyVolume', 'MinPricesellVolume',
+                    'MaxPricebuyVolume', 'MaxPricesellVolume'
+                ]
+                candlestick_data.reset_index(inplace=True)
+
+                # Create the candlestick chart
+                fig3 = go.Figure()
+
+                for i, row in candlestick_data.iterrows():
+                    color = 'red' if (row['MinPricebuyVolume'] != 0) else 'blue'
+                    color = 'green' if (row['MaxPricesellVolume'] != 0) else 'blue'
+
+                    fig3.add_trace(go.Candlestick(
+                        x=[row['timestamp']],
+                        open=[row['low']],
+                        high=[row['high']],
+                        low=[row['low']],
+                        close=[row['high']],
+                        increasing_line_color=color,
+                        decreasing_line_color=color,
+                        showlegend=False
+                    ))
+
+                fig3.update_layout(
+                    title='Candlestick Chart with Highlighted Candles',
+                    xaxis_title='Timestamp',
+                    yaxis_title='Price'
+                )
+
+                st.plotly_chart(fig3)
+
+                # Fourth chart: Volume Clusters
+
+                volume_df['timestamp'] = pd.to_datetime(volume_df['timestamp'])
+
+                # Group by price to calculate total buy and sell volumes at each price level
+                volume_by_price = volume_df.groupby('price').agg(
+                    totalBuyVolume=('buyVolume', 'sum'),
+                    totalSellVolume=('sellVolume', 'sum')
+                ).reset_index()
+
+                # Calculate the min and max price for each timestamp for the candlestick chart
+                candlestick_data = volume_df.groupby('timestamp').agg(
+                    open=('price', 'first'),
+                    high=('price', 'max'),
+                    low=('price', 'min'),
+                    close=('price', 'last')
+                ).reset_index()
+
+                # Plot the candlestick chart
+                fig4 = go.Figure(data=[go.Candlestick(
+                    x=candlestick_data['timestamp'],
+                    open=candlestick_data['open'],
+                    high=candlestick_data['high'],
+                    low=candlestick_data['low'],
+                    close=candlestick_data['close']
+                )])
+
+                # Add buy volume clusters
+                fig4.add_trace(go.Bar(
+                    x=volume_by_price['totalBuyVolume'],
+                    y=volume_by_price['price'],
+                    orientation='h',
+                    marker=dict(color='green', opacity=0.5),
+                    name='Buy Volume',
+                    xaxis='x2'
+                ))
+
+                # Add sell volume clusters
+                fig4.add_trace(go.Bar(
+                    x=volume_by_price['totalSellVolume'],
+                    y=volume_by_price['price'],
+                    orientation='h',
+                    marker=dict(color='red', opacity=0.5),
+                    name='Sell Volume',
+                    xaxis='x2'
+                ))
+
+                # Update layout to include secondary x-axis and adjust the size
+                fig4.update_layout(
+                    title='Candlestick Chart with Volume Clusters',
+                    xaxis_title='Timestamp',
+                    yaxis_title='Price',
+                    xaxis2=dict(title='Volume', overlaying='x', side='top'),
+                    barmode='overlay',
+                    width=1200,
+                    height=800
+                )
+
+                st.plotly_chart(fig4)
+
+                # Fifth chart: Candlestick with HVNs and LVNs
+
+                volume_df['timestamp'] = pd.to_datetime(volume_df['timestamp'])
+
+                # Group by price to calculate total buy and sell volumes at each price level
+                volume_by_price = volume_df.groupby('price').agg(
+                    totalBuyVolume=('buyVolume', 'sum'),
+                    totalSellVolume=('sellVolume', 'sum')
+                ).reset_index()
+
+                # Identify High Volume Nodes (HVNs) and Low Volume Nodes (LVNs)
+                threshold_high = volume_by_price['totalBuyVolume'].quantile(0.75)
+                threshold_low = volume_by_price['totalBuyVolume'].quantile(0.25)
+
+                hvns = volume_by_price[volume_by_price['totalBuyVolume'] >= threshold_high]
+                lvns = volume_by_price[volume_by_price['totalBuyVolume'] <= threshold_low]
+
+                # Calculate the min and max price for each timestamp for the candlestick chart
+                candlestick_data = volume_df.groupby('timestamp').agg(
+                    open=('price', 'first'),
+                    high=('price', 'max'),
+                    low=('price', 'min'),
+                    close=('price', 'last')
+                ).reset_index()
+
+                # Plot the candlestick chart
+                fig5 = go.Figure(data=[go.Candlestick(
+                    x=candlestick_data['timestamp'],
+                    open=candlestick_data['open'],
+                    high=candlestick_data['high'],
+                    low=candlestick_data['low'],
+                    close=candlestick_data['close']
+                )])
+
+                # Add HVNs
+                fig5.add_trace(go.Scatter(
+                    x=hvns['totalBuyVolume'],
+                    y=hvns['price'],
+                    mode='markers',
+                    marker=dict(color='blue', size=10),
+                    name='High Volume Nodes (HVNs)',
+                    xaxis='x2'
+                ))
+
+                # Add LVNs
+                fig5.add_trace(go.Scatter(
+                    x=lvns['totalBuyVolume'],
+                    y=lvns['price'],
+                    mode='markers',
+                    marker=dict(color='yellow', size=10),
+                    name='Low Volume Nodes (LVNs)',
+                    xaxis='x2'
+                ))
+
+                # Add support and resistance lines based on HVNs
+                for price in hvns['price']:
+                    fig5.add_hline(y=price, line=dict(color='green', dash='dash'), name=f'Resistance {price}')
+
+                # Add potential breakout/breakdown zones based on LVNs
+                for price in lvns['price']:
+                    fig5.add_hline(y=price, line=dict(color='red', dash='dash'), name=f'Breakout/Breakdown {price}')
+
+                # Update layout to include secondary x-axis and adjust the size
+                fig5.update_layout(
+                    title='Candlestick Chart with HVNs, LVNs, Support and Resistance',
+                    xaxis_title='Timestamp',
+                    yaxis_title='Price',
+                    xaxis2=dict(title='Volume', overlaying='x', side='top'),
+                    barmode='overlay',
+                    width=1200,
+                    height=800
+                )
+
+                st.plotly_chart(fig5)
+
+                # Sixth chart: Delta (Buy Volume - Sell Volume) by Price and Timestamp
+
+                volume_df['timestamp'] = pd.to_datetime(volume_df['timestamp'])
+
+                # Calculate delta (buy volume - sell volume) for each price level
+                volume_df['delta'] = volume_df['buyVolume'] - volume_df['sellVolume']
+
+                # Group by timestamp and price to calculate total delta at each price level
+                delta_by_price = volume_df.groupby(['timestamp', 'price']).agg(
+                    totalDelta=('delta', 'sum')
+                ).reset_index()
+
+                # Plot delta with x axis as timestamp, y axis as price and delta at those prices
+                fig6 = go.Figure(data=go.Heatmap(
+                    x=delta_by_price['timestamp'],
+                    y=delta_by_price['price'],
+                    z=delta_by_price['totalDelta'],
+                    colorscale='RdYlGn',
+                    colorbar=dict(title='Delta')
+                ))
+
+                # Update layout to adjust the size
+                fig6.update_layout(
+                    title='Delta (Buy Volume - Sell Volume) by Price and Timestamp',
+                    xaxis_title='Timestamp',
+                    yaxis_title='Price',
+                    width=1200,
+                    height=800
+                )
+
+                st.plotly_chart(fig6)
+
+                # Seventh chart: Candlestick Chart with Top 5 Market Absorptions
+
+                volume_df['timestamp'] = pd.to_datetime(volume_df['timestamp'])
+
+                # Calculate the min and max price for each timestamp
+                candlestick_data = volume_df.groupby('timestamp').agg({'price': ['min', 'max']})
+                candlestick_data.columns = ['low', 'high']
+                candlestick_data.reset_index(inplace=True)
+
+                # Calculate total volume (buyVolume + sellVolume) for each price level
+                volume_df['totalVolume'] = volume_df['buyVolume'] + volume_df['sellVolume']
+
+                # Identify the top 5 prices with the highest market absorption (totalVolume) for the entire day
+                top_absorptions = volume_df.nlargest(5, 'totalVolume')
+
+                # Create the candlestick chart
+                fig7 = go.Figure(data=[go.Candlestick(
+                    x=candlestick_data['timestamp'],
+                    low=candlestick_data['low'],
+                    high=candlestick_data['high'],
+                    open=candlestick_data['low'],
+                    close=candlestick_data['high']
+                )])
+
+                # Plot top 5 market absorptions as lines
+                for _, row in top_absorptions.iterrows():
+                    fig7.add_shape(
+                        type="line",
+                        x0=row['timestamp'],
+                        y0=row['price'],
+                        x1=row['timestamp'] + pd.Timedelta(minutes=30),  # Adjust the end point as needed
+                        y1=row['price'],
+                        line=dict(color="Purple", width=2),
+                        name='Top Market Absorption'
+                    )
+
+                fig7.update_layout(
+                    title='Candlestick Chart with Top 5 Market Absorptions',
+                    xaxis_title='Timestamp',
+                    yaxis_title='Price',
+                    width=1200,
+                    height=800
+                )
+
+                st.plotly_chart(fig7)
+
+                # Eighth chart: Aggressive Orders + Delta Setup
+
+                volume_df['timestamp'] = pd.to_datetime(volume_df['timestamp'])
+                volume_df['delta'] = volume_df['buyVolume'] - volume_df['sellVolume']
+
+                # Step 1: Identify strong Support/Resistance zones (for simplicity, we'll set static S/R zones)
+                support_zone = 250.59
+                resistance_zone = 253.40
+
+                # Step 2: Analyze Order Flow data to identify aggressive orders near S/R zones
+                aggressive_orders = volume_df[
+                    ((volume_df['price'] <= support_zone) & (volume_df['buyVolume'] > volume_df['sellVolume'])) |
+                    ((volume_df['price'] >= resistance_zone) & (volume_df['sellVolume'] > volume_df['buyVolume']))
+                ]
+
+                # Step 3: Confirm trades with Delta values
+                trades = []
+                for _, row in aggressive_orders.iterrows():
+                    if row['price'] <= support_zone and row['delta'] > 0:
+                        trades.append((row['timestamp'], row['price'], 'Long'))
+                    elif row['price'] >= resistance_zone and row['delta'] < 0:
+                        trades.append((row['timestamp'], row['price'], 'Short'))
+
+                trades_df = pd.DataFrame(trades, columns=['timestamp', 'price', 'direction'])
+
+                # Create the candlestick chart
+                candlestick_data = volume_df.groupby('timestamp').agg({'price': ['min', 'max']})
+                candlestick_data.columns = ['low', 'high']
+                candlestick_data.reset_index(inplace=True)
+
+                fig8 = go.Figure(data=[go.Candlestick(
+                    x=candlestick_data['timestamp'],
+                    low=candlestick_data['low'],
+                    high=candlestick_data['high'],
+                    open=candlestick_data['low'],
+                    close=candlestick_data['high']
+                )])
+
+                # Add Support/Resistance zones
+                fig8.add_shape(
+                    type="rect",
+                    x0=volume_df['timestamp'].min(),
+                    y0=support_zone - 0.05,
+                    x1=volume_df['timestamp'].max(),
+                    y1=support_zone + 0.05,
+                    fillcolor="Green",
+                    opacity=0.2,
+                    line_width=0,
+                    name='Support Zone'
+                )
+                fig8.add_shape(
+                    type="rect",
+                    x0=volume_df['timestamp'].min(),
+                    y0=resistance_zone - 0.05,
+                    x1=volume_df['timestamp'].max(),
+                    y1=resistance_zone + 0.05,
+                    fillcolor="Red",
+                    opacity=0.2,
+                    line_width=0,
+                    name='Resistance Zone'
+                )
+
+                # Add trades to the chart
+                for _, trade in trades_df.iterrows():
+                    color = 'green' if trade['direction'] == 'Long' else 'red'
+                    fig8.add_trace(go.Scatter(
+                        x=[trade['timestamp']],
+                        y=[trade['price']],
+                        mode='markers+text',
+                        marker=dict(color=color, size=10),
+                        text=trade['direction'],
+                        textposition='top center',
+                        name=trade['direction']
+                    ))
+
+                fig8.update_layout(
+                    title='Aggressive Orders + Delta Setup',
+                    xaxis_title='Timestamp',
+                    yaxis_title='Price',
+                    width=1200,
+                    height=800
+                )
+
+                st.plotly_chart(fig8)
+
+                # Ninth chart: Cumulative Delta Confirmation Setup
+
+                volume_df['timestamp'] = pd.to_datetime(volume_df['timestamp'])
+                volume_df['delta'] = volume_df['buyVolume'] - volume_df['sellVolume']
+                volume_df['cumDelta'] = volume_df['delta'].cumsum()
+
+                # Step 1: Identify strong Support/Resistance zones (for simplicity, we'll set static S/R zones)
+                support_zone = 253.10
+                resistance_zone = 253.50
+
+                # Step 2: Create a Cumulative Delta line chart
+                cum_delta_trace = go.Scatter(
+                    x=volume_df['timestamp'],
+                    y=volume_df['cumDelta'],
+                    mode='lines',
+                    name='Cumulative Delta',
+                    line=dict(color='blue')
+                )
+
+                # Step 3: Identify divergences between Price and Cum. Delta
+                divergences = []
+                for i in range(1, len(volume_df)):
+                    if volume_df['price'].iloc[i] > volume_df['price'].iloc[i-1] and volume_df['cumDelta'].iloc[i] < volume_df['cumDelta'].iloc[i-1]:
+                        divergences.append((volume_df['timestamp'].iloc[i], volume_df['price'].iloc[i], 'Short'))
+                    elif volume_df['price'].iloc[i] < volume_df['price'].iloc[i-1] and volume_df['cumDelta'].iloc[i] > volume_df['cumDelta'].iloc[i-1]:
+                        divergences.append((volume_df['timestamp'].iloc[i], volume_df['price'].iloc[i], 'Long'))
+
+                divergences_df = pd.DataFrame(divergences, columns=['timestamp', 'price', 'direction'])
+
+                # Create the candlestick chart
+                candlestick_data = volume_df.groupby('timestamp').agg({'price': ['min', 'max']})
+                candlestick_data.columns = ['low', 'high']
+                candlestick_data.reset_index(inplace=True)
+
+                fig9 = go.Figure(data=[go.Candlestick(
+                    x=candlestick_data['timestamp'],
+                    low=candlestick_data['low'],
+                    high=candlestick_data['high'],
+                    open=candlestick_data['low'],
+                    close=candlestick_data['high'],
+                    name='Price'
+                )])
+
+                # Add Cumulative Delta line chart
+                fig9.add_trace(cum_delta_trace)
+
+                # Add Support/Resistance zones
+                fig9.add_shape(
+                    type="rect",
+                    x0=volume_df['timestamp'].min(),
+                    y0=support_zone - 0.05,
+                    x1=volume_df['timestamp'].max(),
+                    y1=support_zone + 0.05,
+                    fillcolor="Green",
+                    opacity=0.2,
+                    line_width=0,
+                    name='Support Zone'
+                )
+                fig9.add_shape(
+                    type="rect",
+                    x0=volume_df['timestamp'].min(),
+                    y0=resistance_zone - 0.05,
+                    x1=volume_df['timestamp'].max(),
+                    y1=resistance_zone + 0.05,
+                    fillcolor="Red",
+                    opacity=0.2,
+                    line_width=0,
+                    name='Resistance Zone'
+                )
+
+                # Add divergences to the chart
+                for _, divergence in divergences_df.iterrows():
+                    color = 'green' if divergence['direction'] == 'Long' else 'red'
+                    fig9.add_trace(go.Scatter(
+                        x=[divergence['timestamp']],
+                        y=[divergence['price']],
+                        mode='markers+text',
+                        marker=dict(color=color, size=10),
+                        text=divergence['direction'],
+                        textposition='top center',
+                        name=divergence['direction']
+                    ))
+
+                fig9.update_layout(
+                    title='Cumulative Delta Confirmation Setup',
+                    xaxis_title='Timestamp',
+                    yaxis_title='Price',
+                    width=1200,
+                    height=800
+                )
+
+                st.plotly_chart(fig9)
+
+                # Tenth chart: Volume Profile Shape Identification
+
+                volume_df['timestamp'] = pd.to_datetime(volume_df['timestamp'])
+                volume_df['totalVolume'] = volume_df['buyVolume'] + volume_df['sellVolume']
+
+                # Group by price to get the total volume for each price level
+                volume_profile = volume_df.groupby('price').agg(totalVolume=('totalVolume', 'sum')).reset_index()
+
+                # Identify peaks in the volume profile
+                volumes = volume_profile['totalVolume'].values
+                prices = volume_profile['price'].values
+
+                peaks, _ = find_peaks(volumes, distance=1)
+
+                # Determine the shape
+                shape = ""
+                if len(peaks) == 1:
+                    shape = "I-shape"
+                elif len(peaks) == 2:
+                    shape = "B-shape"
+                else:
+                    if peaks[0] < len(volumes) / 3:
+                        shape = "P-shape"
+                    elif peaks[-1] > 2 * len(volumes) / 3:
+                        shape = "B-shape"
+                    else:
+                        shape = "D-shape"
+
+                # Create the volume profile bar chart
+                fig10 = go.Figure()
+                fig10.add_trace(go.Bar(
+                    x=volume_profile['totalVolume'],
+                    y=volume_profile['price'],
+                    orientation='h',
+                    marker=dict(color='blue'),
+                    name='Volume Profile'
+                ))
+
+                # Add peaks to the chart
+                fig10.add_trace(go.Scatter(
+                    x=volumes[peaks],
+                    y=prices[peaks],
+                    mode='markers',
+                    marker=dict(color='red', size=10),
+                    name='Peaks'
+                ))
+
+                fig10.update_layout(
+                    title=f'Volume Profile Shape: {shape}',
+                    xaxis_title='Volume',
+                    yaxis_title='Price',
+                    width=800,
+                    height=600
+                )
+
+                st.plotly_chart(fig10)
+
+            except json.JSONDecodeError:
+                st.write("Error: The uploaded file does not contain valid JSON data.")
+            except KeyError as e:
+                st.write(f"Error: Key {e} not found in the JSON data.")
+        else:
+            st.write("Please upload a file before submitting.")
+
+elif tab == "Headers and Cookies":
     # Input boxes for the headers and cookies
     xsrf_token = st.text_input("Enter X-Xsrf-Token:", st.session_state.xsrf_token)
     laravel_token = st.text_input("Enter laravel_token:", st.session_state.laravel_token)
@@ -61,7 +1492,7 @@ if tab == "Headers and Cookies":
 
 elif tab == "Chat Interface":
 
-    ticker = st.text_input("Enter Stock Ticker", value="AAPL")
+    
     default_date = datetime.today().date()
     input_date = st.date_input("Start Date", value=default_date)
 
@@ -1259,8 +2690,8 @@ elif tab == "Chat Interface":
         date = sorted_dates[i]
         previous_date = sorted_dates[i - 1]
 
-        print(f"Current Date: {date}")
-        print(f"Previous Date: {previous_date}")
+        # print(f"Current Date: {date}")
+        # print(f"Previous Date: {previous_date}")
 
         # Extract data for the previous date
         previous_data = final_data[final_data['Date'] == previous_date]
@@ -1321,8 +2752,8 @@ elif tab == "Chat Interface":
 
 
 
-        # Print or perform further operations with actions
-        print(actions)
+        # # Print or perform further operations with actions
+        # print(actions)
 
         final_data.loc[final_data['Date'] == previous_date, '2 Day VAH and VAL'] = str(actions)
         final_data.loc[final_data['Date'] == previous_date, 'Adjusted Day Type'] = str(final_day_type)
@@ -1634,7 +3065,7 @@ elif tab == "Chat Interface":
             def fetch_data_until_start_date(start_date='2024-01-01'):
                 all_data = pd.DataFrame()  # Initialize an empty DataFrame to store all data
                 next_url = BASE_URL  # Start with the base URL
-                print(next_url)
+                # print(next_url)
 
                 while True:
                     # Fetch data from the API
@@ -1757,7 +3188,7 @@ elif tab == "Chat Interface":
             # Create dataframes for each ticker
             dataframes = {}
             for ind_ticker in tickers:
-                time.sleep(15)
+                time.sleep(5)
                 st.write(ind_ticker)
 
                 # Base URL and parameters
@@ -2556,11 +3987,20 @@ elif tab == "Chat Interface":
             # Apply the grouping function
             grouped_df = group_continuous_ranges(filtered_final_df)
 
+            # st.write("grouped_df")
+            # st.write(grouped_df)
+
             # # Display the grouped dataframe
             # print(grouped_df)
 
             # Create an empty list to store rows for the new dataframe
             poc_data_list = []
+
+            # st.write(final_df)
+
+            distribution['data']['Date'] = pd.to_datetime(distribution['data']['Date']).dt.date
+            grouped_df['Date'] = pd.to_datetime(grouped_df['Date']).dt.date
+            final_df['Date'] = pd.to_datetime(final_df['Date']).dt.date
 
             # Iterate through each date's group in distribution['data']
             for date, group in distribution['data'].groupby('Date'):
@@ -2568,10 +4008,14 @@ elif tab == "Chat Interface":
                 poor_high = False
                 
                 # Convert the current date to datetime format to match the final_df format
-                date = pd.to_datetime(date)
+                # date = pd.to_datetime(date)
+                # st.write(date)
                 # Filter the final_df by the current date
                 filtered_date_df = final_df[final_df['Date'] == date]
                 filtered_grouped_single_fp_df = grouped_df[grouped_df['Date'] == date]
+
+                # st.write(filtered_date_df)
+                # st.write(filtered_grouped_single_fp_df)
                 
                 # Check if the condition is True for any row in the filtered dataframe
                 if (filtered_date_df[filtered_date_df['Range_Low'] == filtered_date_df['Range_Low'].min()]['Letter_Count'] > 1).any():
@@ -2579,7 +4023,7 @@ elif tab == "Chat Interface":
                 if (filtered_date_df[filtered_date_df['Range_High'] == filtered_date_df['Range_High'].max()]['Letter_Count'] > 1).any():
                     poor_high = True
                 
-                print(filtered_date_df)
+                # print(filtered_date_df)
             #     print(filtered_grouped_single_fp_df)
                 
                 # Extract unique values of IB_High and IB_Low for the current date
@@ -2619,8 +4063,10 @@ elif tab == "Chat Interface":
             # Create a DataFrame from the list of dictionaries
             final_poc_data = pd.DataFrame(poc_data_list)
 
-            # # Print the new dataframe to verify its contents
-            # print(final_poc_data)
+            final_poc_data['Date'] = pd.to_datetime(final_poc_data['Date']).dt.date
+
+            # Print the new dataframe to verify its contents
+            st.write(final_poc_data)
 
             day_ranges = []
             day_types = []
@@ -2630,6 +4076,8 @@ elif tab == "Chat Interface":
             for date, group in final_poc_data.groupby('Date'):
                 day_type = ''
                 close_type = ''
+
+                # st.write(group)
                 
                 # Calculate day's total range
                 day_range = round(group['High'].max() - group['Low'].min(),2)
@@ -3169,7 +4617,12 @@ elif tab == "Chat Interface":
 
                 st.write(input_text)
 
-            training_data_df = training_data_df[training_data_df['Date'] < pd.to_datetime(input_date)]
+            st.write(training_data_df)
+            st.write(input_date)
+            st.write(pd.to_datetime(input_date))
+
+            # training_data_df = training_data_df[training_data_df['Date'] < pd.to_datetime(input_date)]
+            training_data_df = training_data_df[training_data_df['Date'] < input_date]
 
 
             # Display the final training DataFrame
@@ -3277,15 +4730,88 @@ elif tab == "Chat Interface":
                 'range_type': 0.2    # weight for categorical range types (e.g., Range_Type)
             }
 
-            # Calculate similarities for each segment
+    #         # Calculate similarities for each segment
+    #         similarity_results = []
+    #         for index, row in training_data_df.iterrows():
+    #         #     row_similarity = {'Date': row['Date'], 'Trend': row['Trend']}
+    #             row_similarity = {'Date': row['Date'],'Input Text':row['Input Text'],'Trend':row['Trend'], 'Result': row['Result']}
+
+    #             # Calculate embedding if 'embedding' column does not exist
+    #             if 'embedding' not in row:
+    #                 row['embedding'] = model.encode(row['Input Text'], convert_to_tensor=True)
+
+    #             # Accumulators for weighted score
+    #             technical_score = 0
+    #             ib_ranges_score = 0
+    #             gaps_score = 0
+    #             range_type_score = 0
+
+    #             for segment, details in segments.items():
+    # #                 st.write(segment)
+    # #                 st.write(details)
+    #                 if 'category' in details:
+    #                     # Categorical similarity
+    #                     segment_embedding = query_segment_embeddings[segment]
+    #                     semantic_similarity = util.pytorch_cos_sim(segment_embedding, row['embedding']).item()
+    #                     row_similarity[f"{segment}_semantic_similarity"] = semantic_similarity
+
+    #                     # Add to range type score if it's Range_Type
+    #                     if segment == "Range_Type":
+    #                         range_type_score += semantic_similarity
+
+    #                 elif 'numeric_value' in details:
+    #                     # Numeric similarity
+    #                     query_value = details['numeric_value']
+    #                     extracted_value = extract_numeric_value(row['Input Text'], segment)
+    #                     euclidean_similarity = calculate_normalized_similarity(query_value, extracted_value)
+    #                     row_similarity[f"{segment}_euclidean_similarity"] = euclidean_similarity
+
+    #                     # Categorize and add scores to respective categories
+    #                     if segment in ["Moving_Avg_20", "RSI", "MACD", "Signal_Line", "Bollinger_Upper", "Bollinger_Lower", "VWAP", "ATR"]:
+    #                         technical_score += euclidean_similarity
+    #                     elif segment in ["IB_High", "IB_Low", "IB_Range"]:
+    #                         ib_ranges_score += euclidean_similarity
+    #                     elif segment in ["Opening_Gap_Percentage", "Opening_Gap_Points"]:
+    #                         gaps_score += euclidean_similarity
+    #                 else:
+    #                     # Additional semantic similarity for other segments
+    #                     segment_embedding = query_segment_embeddings[segment]
+    #                     semantic_similarity = util.pytorch_cos_sim(segment_embedding, row['embedding']).item()
+    #                     row_similarity[f"{segment}_semantic_similarity"] = semantic_similarity
+
+
+    #             # Calculate weighted similarity score
+    #             total_similarity_score = (
+    #                 technical_score * weights['technical'] +
+    #                 ib_ranges_score * weights['ib_ranges'] +
+    #                 gaps_score * weights['gaps'] +
+    #                 range_type_score * weights['range_type']
+    #             )
+    #             row_similarity['total_similarity_score'] = total_similarity_score
+
+    #             # Append row results to similarity results
+    #             similarity_results.append(row_similarity)
+
+    #         # Convert results to DataFrame for inspection
+    #         similarity_df = pd.DataFrame(similarity_results)
+
             similarity_results = []
+
             for index, row in training_data_df.iterrows():
-            #     row_similarity = {'Date': row['Date'], 'Trend': row['Trend']}
-                row_similarity = {'Date': row['Date'],'Input Text':row['Input Text'],'Trend':row['Trend'], 'Result': row['Result']}
+                row_similarity = {
+                    'Date': row['Date'],
+                    'Input Text': row['Input Text'],
+                    'Trend': row['Trend'],
+                    'Result': row['Result']
+                }
 
                 # Calculate embedding if 'embedding' column does not exist
-                if 'embedding' not in row:
-                    row['embedding'] = model.encode(row['Input Text'], convert_to_tensor=True)
+                if 'embedding' not in row or pd.isna(row['embedding']):
+                    embedding_tensor = model.encode(row['Input Text'], convert_to_tensor=True)
+                    row['embedding'] = embedding_tensor.cpu().numpy()  # Move tensor to CPU and convert to NumPy
+
+                # Convert stored embedding back to tensor for computation
+                row_embedding_tensor = torch.tensor(row['embedding']).to('cuda' if torch.cuda.is_available() else 'cpu')
 
                 # Accumulators for weighted score
                 technical_score = 0
@@ -3294,12 +4820,11 @@ elif tab == "Chat Interface":
                 range_type_score = 0
 
                 for segment, details in segments.items():
-    #                 st.write(segment)
-    #                 st.write(details)
                     if 'category' in details:
                         # Categorical similarity
                         segment_embedding = query_segment_embeddings[segment]
-                        semantic_similarity = util.pytorch_cos_sim(segment_embedding, row['embedding']).item()
+                        segment_embedding = segment_embedding.to(row_embedding_tensor.device)  # Ensure same device
+                        semantic_similarity = util.pytorch_cos_sim(segment_embedding, row_embedding_tensor).item()
                         row_similarity[f"{segment}_semantic_similarity"] = semantic_similarity
 
                         # Add to range type score if it's Range_Type
@@ -3323,9 +4848,9 @@ elif tab == "Chat Interface":
                     else:
                         # Additional semantic similarity for other segments
                         segment_embedding = query_segment_embeddings[segment]
-                        semantic_similarity = util.pytorch_cos_sim(segment_embedding, row['embedding']).item()
+                        segment_embedding = segment_embedding.to(row_embedding_tensor.device)  # Ensure same device
+                        semantic_similarity = util.pytorch_cos_sim(segment_embedding, row_embedding_tensor).item()
                         row_similarity[f"{segment}_semantic_similarity"] = semantic_similarity
-
 
                 # Calculate weighted similarity score
                 total_similarity_score = (
@@ -3350,7 +4875,8 @@ elif tab == "Chat Interface":
             # Prepare reference information from the top 15 similar entries
             reference_info = ""
             for _, sim in top_15_similar.iterrows():
-                filtered_data = training_data_df[training_data_df['Date'] == pd.Timestamp(sim['Date'])]
+                # filtered_data = training_data_df[training_data_df['Date'] == pd.Timestamp(sim['Date'])]
+                filtered_data = training_data_df[training_data_df['Date'] == sim['Date']]
 
                 if not filtered_data.empty:
                     entry_text = filtered_data.iloc[0]['Input Text']
@@ -3358,6 +4884,7 @@ elif tab == "Chat Interface":
                     result = filtered_data.iloc[0]['Result']
             #         reference_info += f"Date: {sim['Date']}\nInput Text: {entry_text}\nTrend: {trend}\n\n"
                     reference_info += f"Date: {sim['Date']}\nInput Text: {entry_text}\Result: {result}\n\n"
+
 
             # # Build the full prompt for LLM
             # prompt = f"""
